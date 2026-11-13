@@ -56,9 +56,11 @@ type Record struct {
 	RevertSHA        string      `json:"revert_sha,omitempty"`
 	FirstRoundPassed bool        `json:"first_round_passed"`
 	// ReviewPending はレビュー担当の利用枠待ちである。push と PR は済んでいるので、再開時はレビューからやり直す。
-	ReviewPending bool      `json:"review_pending,omitempty"`
-	StartedAt     time.Time `json:"started_at"`
-	UpdatedAt     time.Time `json:"updated_at"`
+	ReviewPending bool `json:"review_pending,omitempty"`
+	// ThreadID は実装担当の Codex の thread である。修正の依頼と再開で同じ thread に送る。
+	ThreadID  string    `json:"thread_id,omitempty"`
+	StartedAt time.Time `json:"started_at"`
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 type Store struct{ Root string }

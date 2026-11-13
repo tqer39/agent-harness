@@ -116,3 +116,15 @@ func TestRepoKeysIgnoreCase(t *testing.T) {
 		t.Fatal("lock must not depend on case")
 	}
 }
+
+func TestRecordKeepsThreadID(t *testing.T) {
+	store := Store{Root: t.TempDir()}
+	rec := &Record{RunID: "r1", Repo: "o/n", Status: StatusImplementing, ThreadID: "thread-1"}
+	if err := store.Save(rec); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := store.Load("r1")
+	if err != nil || loaded.ThreadID != "thread-1" {
+		t.Fatalf("loaded=%+v err=%v", loaded, err)
+	}
+}
