@@ -148,23 +148,19 @@ func assertStopped(t *testing.T, pidFile string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// シグナルの配送と回収は非同期なので、少し待つ。
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if runtime.GOOS == "linux" {
-			// zombie は終了済み。PID 1 が孤児を回収しないコンテナでも判定する。
-			if stat, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid)); err == nil {
-				_, state, found := strings.Cut(string(stat), ") ")
-				if found && strings.HasPrefix(state, "Z ") {
-					return
-				}
+	// Run が戻った時点で止まっていることを確かめる。排他を外した後に作業用 clone を書き換えさせないため、待たない。
+	if runtime.GOOS == "linux" {
+		// zombie は終了済み。PID 1 が孤児を回収しないコンテナでも判定する。
+		if stat, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid)); err == nil {
+			_, state, found := strings.Cut(string(stat), ") ")
+			if found && strings.HasPrefix(state, "Z ") {
+				return
 			}
 		}
-		if err := syscall.Kill(pid, 0); errors.Is(err, syscall.ESRCH) {
-			return
-		}
-		time.Sleep(20 * time.Millisecond)
+	}
+	if err := syscall.Kill(pid, 0); errors.Is(err, syscall.ESRCH) {
+		return
 	}
 	_ = syscall.Kill(pid, syscall.SIGKILL)
-	t.Fatalf("process %d is still running", pid)
+	t.Fatalf("process %d is still running when Run returned", pid)
 }

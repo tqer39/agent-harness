@@ -87,7 +87,7 @@ func (OSRunner) Run(ctx context.Context, c Cmd) (string, error) {
 	}
 	if cmd.Process != nil {
 		// 終了後に残った子孫が作業用 clone を書き換え続けないよう、グループごと止める。
-		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		stopGroup(cmd.Process.Pid)
 	}
 	if err == nil {
 		if c.CombineOutput {
@@ -105,6 +105,22 @@ func (OSRunner) Run(ctx context.Context, c Cmd) (string, error) {
 		Code:   code,
 		Stdout: redact(stdout.String(), c.Secrets),
 		Stderr: redact(stderr.String(), c.Secrets),
+	}
+}
+
+// stopGroup はグループの全員に SIGKILL を送り、いなくなるまで待つ。
+// SIGKILL の配送は非同期なので、待たずに戻ると、呼び出し側が排他を外した後も子孫が書き込みを続けることがある。
+// PID 1 が孤児を回収しない環境では zombie が残り続けるので、待つ時間に上限を設ける。
+func stopGroup(pgid int) {
+	if err := syscall.Kill(-pgid, syscall.SIGKILL); errors.Is(err, syscall.ESRCH) {
+		return
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if err := syscall.Kill(-pgid, 0); errors.Is(err, syscall.ESRCH) {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 }
 
