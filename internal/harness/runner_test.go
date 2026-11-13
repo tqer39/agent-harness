@@ -85,9 +85,45 @@ func TestOSRunnerDropsOrcaVariables(t *testing.T) {
 
 func TestOSRunnerStopsDescendantsOnCancel(t *testing.T) {
 	pidFile := filepath.Join(t.TempDir(), "pid")
-	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	_, _ = OSRunner{}.Run(ctx, Cmd{Name: "sh", Args: []string{"-c", "sleep 30 >/dev/null 2>&1 & echo $! > " + pidFile + "; wait"}})
+	done := make(chan error, 1)
+	go func() {
+		// 子孫は出力を開いたままにする。グループ停止がないと Wait が戻らない。
+		_, err := OSRunner{}.Run(ctx, Cmd{Name: "sh", Args: []string{"-c", "sleep 30 & echo $! > " + pidFile + "; wait"}})
+		done <- err
+	}()
+	// pid ファイルができる前にキャンセルすると不安定になるので、できるのを待つ。
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if data, err := os.ReadFile(pidFile); err == nil && strings.TrimSpace(string(data)) != "" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("pid file was not written")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel()
+	select {
+	case err := <-done:
+		var runErr *RunError
+		if !errors.As(err, &runErr) {
+			t.Fatalf("err=%v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Run did not return promptly after cancel")
+	}
+	assertStopped(t, pidFile)
+}
+
+// 本体が成功し、子孫が出力を開いたまま残っただけなら成功とみなす。
+func TestOSRunnerSucceedsWhenDescendantHoldsStdout(t *testing.T) {
+	pidFile := filepath.Join(t.TempDir(), "pid")
+	out, err := OSRunner{}.Run(context.Background(), Cmd{Name: "sh", Args: []string{"-c", "echo hi; sleep 30 & echo $! > " + pidFile}})
+	if err != nil || out != "hi\n" {
+		t.Fatalf("out=%q err=%v", out, err)
+	}
 	assertStopped(t, pidFile)
 }
 

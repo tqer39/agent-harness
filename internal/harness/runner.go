@@ -26,7 +26,8 @@ type Cmd struct {
 	Secrets []string
 	// CombineOutput は標準エラーも出力に含める。状態を標準エラーに出すコマンドに使う。
 	CombineOutput bool
-	// Stdout が nil でなければ、標準出力を逐次ここに渡す。戻り値の出力は空になる。
+	// Stdout が nil でなければ、標準出力を逐次ここに渡す。戻り値の出力と、失敗時の RunError.Stdout は空になる。
+	// 逐次渡す出力には Secrets の伏せ字をかけない。
 	Stdout io.Writer
 }
 
@@ -69,10 +70,21 @@ func (OSRunner) Run(ctx context.Context, c Cmd) (string, error) {
 	cmd.Stderr = &stderr
 	// 子孫のプロセスもまとめて止められるよう、プロセスグループを分ける。
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
+	cmd.Cancel = func() error {
+		err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		// 既定の Process.Kill と同じく、終了済みはエラーにしない。
+		if errors.Is(err, syscall.ESRCH) {
+			return os.ErrProcessDone
+		}
+		return err
+	}
 	// 子孫が出力を開いたまま残ると Wait が戻らないので、待機を打ち切る。
 	cmd.WaitDelay = 5 * time.Second
 	err := cmd.Run()
+	// 本体は成功し、残った子孫が出力を開いたままだっただけなら成功とみなす。子孫は直後にグループごと止める。
+	if errors.Is(err, exec.ErrWaitDelay) && cmd.ProcessState != nil && cmd.ProcessState.Success() {
+		err = nil
+	}
 	if cmd.Process != nil {
 		// 終了後に残った子孫が作業用 clone を書き換え続けないよう、グループごと止める。
 		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
