@@ -4,6 +4,7 @@ package harness
 
 import (
 	"bytes"
+	"errors"
 	"strings"
 	"testing"
 )
@@ -90,5 +91,19 @@ func TestCodexEventsShowsNonJSONLines(t *testing.T) {
 	}
 	if out.String() != "panic at x.go\n" || log.String() != "panic at /work/x.go\n" {
 		t.Fatalf("out=%q log=%q", out.String(), log.String())
+	}
+}
+
+func TestCodexEventsKeepsFirstErrorForFlush(t *testing.T) {
+	var log, out bytes.Buffer
+	saveErr := errors.New("save failed")
+	events := &codexEvents{log: &log, out: &out, onThread: func(string) error { return saveErr }}
+	_, err := events.Write([]byte(`{"type":"thread.started","thread_id":"t-1"}` + "\n"))
+	if !errors.Is(err, saveErr) {
+		t.Fatalf("write err=%v", err)
+	}
+	// exec はプロセスの終了エラーを優先して返すので、Flush でも同じエラーを返す。
+	if err := events.Flush(); !errors.Is(err, saveErr) {
+		t.Fatalf("flush err=%v", err)
 	}
 }

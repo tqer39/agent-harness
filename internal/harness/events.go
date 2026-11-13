@@ -20,6 +20,8 @@ type codexEvents struct {
 	pending []byte
 	// onThread は thread.started を受け取った時点で呼ぶ。中断されても thread を残せるようにする。
 	onThread func(string) error
+	// err は最初の処理エラーである。exec はプロセスの終了エラーを優先して返すので、Flush で返す。
+	err error
 
 	ThreadID string
 	// Failure は turn.failed と最上位の error の本文である。最後のものを残す。
@@ -47,6 +49,9 @@ type codexEvent struct {
 }
 
 func (e *codexEvents) Write(p []byte) (int, error) {
+	if e.err != nil {
+		return len(p), e.err
+	}
 	e.pending = append(e.pending, p...)
 	for {
 		i := bytes.IndexByte(e.pending, '\n')
@@ -56,6 +61,7 @@ func (e *codexEvents) Write(p []byte) (int, error) {
 		line := e.pending[:i]
 		e.pending = e.pending[i+1:]
 		if err := e.handle(line); err != nil {
+			e.err = err
 			return len(p), err
 		}
 	}
@@ -63,6 +69,9 @@ func (e *codexEvents) Write(p []byte) (int, error) {
 
 // Flush はプロセスの終了後に、改行で終わらなかった最後の行を処理する。
 func (e *codexEvents) Flush() error {
+	if e.err != nil {
+		return e.err
+	}
 	line := e.pending
 	e.pending = nil
 	return e.handle(line)
