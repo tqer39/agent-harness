@@ -8,9 +8,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"strings"
+	"syscall"
+	"time"
 )
 
 // Cmd は 1 回のコマンド実行を表す。Env は明示的に渡す値だけを追加する。
@@ -23,6 +26,8 @@ type Cmd struct {
 	Secrets []string
 	// CombineOutput は標準エラーも出力に含める。状態を標準エラーに出すコマンドに使う。
 	CombineOutput bool
+	// Stdout が nil でなければ、標準出力を逐次ここに渡す。戻り値の出力は空になる。
+	Stdout io.Writer
 }
 
 type Runner interface {
@@ -58,8 +63,20 @@ func (OSRunner) Run(ctx context.Context, c Cmd) (string, error) {
 	cmd.Env = append(env, c.Env...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
+	if c.Stdout != nil {
+		cmd.Stdout = c.Stdout
+	}
 	cmd.Stderr = &stderr
+	// 子孫のプロセスもまとめて止められるよう、プロセスグループを分ける。
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
+	// 子孫が出力を開いたまま残ると Wait が戻らないので、待機を打ち切る。
+	cmd.WaitDelay = 5 * time.Second
 	err := cmd.Run()
+	if cmd.Process != nil {
+		// 終了後に残った子孫が作業用 clone を書き換え続けないよう、グループごと止める。
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	}
 	if err == nil {
 		if c.CombineOutput {
 			return stdout.String() + stderr.String(), nil
