@@ -6,8 +6,10 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -149,6 +151,15 @@ func assertStopped(t *testing.T, pidFile string) {
 	// シグナルの配送と回収は非同期なので、少し待つ。
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
+		if runtime.GOOS == "linux" {
+			// zombie は終了済み。PID 1 が孤児を回収しないコンテナでも判定する。
+			if stat, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid)); err == nil {
+				_, state, found := strings.Cut(string(stat), ") ")
+				if found && strings.HasPrefix(state, "Z ") {
+					return
+				}
+			}
+		}
 		if err := syscall.Kill(pid, 0); errors.Is(err, syscall.ESRCH) {
 			return
 		}

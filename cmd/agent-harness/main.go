@@ -328,11 +328,13 @@ func runCommand(args []string, out io.Writer) error {
 			return err
 		}
 	}
-	if err := updateCodex(out); err != nil {
+	ctx, stop := signalContext()
+	defer stop()
+	if err := updateCodex(ctx, out); err != nil {
 		return err
 	}
 	// 使えないモデルでは実装担当が起動直後に止まるので、clone を作る前に確認する。
-	if err := checkModel(*codexAuth, selected.Model); err != nil {
+	if err := checkModel(ctx, *codexAuth, selected.Model); err != nil {
 		return err
 	}
 	orchestrator, err := build(*repo, *codexAuth, out)
@@ -347,14 +349,12 @@ func runCommand(args []string, out io.Writer) error {
 		Status: harness.StatusImplementing,
 	}
 	fmt.Fprintf(out, "実行 ID: %s\n", rec.RunID)
-	ctx, stop := signalContext()
-	defer stop()
 	err = orchestrator.Run(ctx, rec, acceptance, *approved)
 	return report(out, rec, err)
 }
 
 // updateCodex は作業の前に Codex CLI を最新の版にする。
-func updateCodex(out io.Writer) error {
+func updateCodex(ctx context.Context, out io.Writer) error {
 	mise, err := resolve("mise")
 	if err != nil {
 		return err
@@ -366,10 +366,13 @@ func updateCodex(out io.Writer) error {
 			env = append(env, kv)
 		}
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
 	from, to, err := harness.UpdateCodex(ctx, harness.OSRunner{}, mise, env)
 	if err != nil {
+		if ctx.Err() == context.Canceled {
+			return ctx.Err()
+		}
 		// レジストリに届かなくても、今の CLI でモデルを使えるなら続ける。使えるかは checkModel が判定する。
 		fmt.Fprintf(out, "Codex CLI を更新できないので、今の版で続けます: %v\n", err)
 		return nil
@@ -381,7 +384,7 @@ func updateCodex(out io.Writer) error {
 }
 
 // checkModel は実行と同じ認証方式と Codex の実体で、モデルを使えるかを確認する。
-func checkModel(auth, model string) error {
+func checkModel(ctx context.Context, auth, model string) error {
 	home, err := codexHomeFor(auth)
 	if err != nil {
 		return err
@@ -390,7 +393,7 @@ func checkModel(auth, model string) error {
 	if err != nil {
 		return err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	ctx, cancel := context.WithTimeout(ctx, time.Minute)
 	defer cancel()
 	return harness.ModelAvailable(ctx, harness.OSRunner{}, codex, home, model)
 }
@@ -542,7 +545,7 @@ func doctor(args []string, out io.Writer) error {
 	}
 	// 認証できないと一覧を取れず、原因と違う失敗が並ぶので、認証の失敗だけを示す。
 	if authErr == nil {
-		check("Codex のモデル "+*model, checkModel(*codexAuth, *model))
+		check("Codex のモデル "+*model, checkModel(context.Background(), *codexAuth, *model))
 	}
 	// 実際のレビューと同じ実体で確認する。
 	claude, err := resolve("claude")

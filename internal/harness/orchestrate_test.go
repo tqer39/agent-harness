@@ -19,11 +19,13 @@ type fakeAgents struct {
 	started      int
 	reviewed     int
 	prompts      []string
+	implPrompts  []string
 	detail       string
 }
 
 // Implement は新しい thread の起動を started、同じ thread への送信を sent に数える。
 func (f *fakeAgents) Implement(_ context.Context, rec *Record, _, prompt string, _ time.Duration) (ImplReport, error) {
+	f.implPrompts = append(f.implPrompts, prompt)
 	if rec.ThreadID == "" {
 		f.started++
 		rec.ThreadID = "thread-1"
@@ -865,5 +867,23 @@ func TestImplementerStopReasonIsShort(t *testing.T) {
 	orchestrator, rec = newOrchestrator(t, agents, &fakeTree{}, &fakeForge{}, fakeScanner{})
 	if err := orchestrator.Run(context.Background(), rec, nil, true); !errors.Is(err, ErrStopped) || len(rec.StopReason) > 1100 || !strings.HasSuffix(rec.StopReason, "end") {
 		t.Fatalf("err=%v len=%d", err, len(rec.StopReason))
+	}
+}
+
+func TestResumeLegacyReviewIncludesTaskInNewThread(t *testing.T) {
+	agents := &fakeAgents{reviews: [][]byte{[]byte(repairVerdict), []byte(passVerdict)}}
+	orchestrator, rec := newOrchestrator(t, agents, &fakeTree{}, &fakeForge{mergeResult: "merge"}, fakeScanner{})
+	rec.ReviewPending, rec.HeadSHA, rec.PR = true, "abc", 1
+	rec.Task, rec.Criteria, rec.Pinned = "legacy task", "c", []string{"fixed_test.go"}
+	if err := orchestrator.Resume(context.Background(), rec); err != nil {
+		t.Fatal(err)
+	}
+	if len(agents.implPrompts) != 1 {
+		t.Fatalf("prompts=%v", agents.implPrompts)
+	}
+	for _, want := range []string{rec.Task, rec.Criteria, "fixed_test.go", rec.RunID, "直す"} {
+		if !strings.Contains(agents.implPrompts[0], want) {
+			t.Errorf("missing %q: %s", want, agents.implPrompts[0])
+		}
 	}
 }

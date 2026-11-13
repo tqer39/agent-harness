@@ -22,6 +22,8 @@ type codexEvents struct {
 	onThread func(string) error
 	// err は最初の処理エラーである。exec はプロセスの終了エラーを優先して返すので、Flush で返す。
 	err error
+	// stop は記録や表示が失敗したとき、子プロセスを直ちに止める。
+	stop func()
 
 	ThreadID string
 	// Failure は turn.failed と最上位の error の本文である。最後のものを残す。
@@ -62,6 +64,9 @@ func (e *codexEvents) Write(p []byte) (int, error) {
 		e.pending = e.pending[i+1:]
 		if err := e.handle(line); err != nil {
 			e.err = err
+			if e.stop != nil {
+				e.stop()
+			}
 			return len(p), err
 		}
 	}

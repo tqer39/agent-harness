@@ -5,6 +5,7 @@ package harness
 import (
 	"bytes"
 	"errors"
+	"io"
 	"strings"
 	"testing"
 )
@@ -105,5 +106,34 @@ func TestCodexEventsKeepsFirstErrorForFlush(t *testing.T) {
 	// exec はプロセスの終了エラーを優先して返すので、Flush でも同じエラーを返す。
 	if err := events.Flush(); !errors.Is(err, saveErr) {
 		t.Fatalf("flush err=%v", err)
+	}
+}
+
+type failingEventWriter struct{ err error }
+
+func (w failingEventWriter) Write([]byte) (int, error) { return 0, w.err }
+func TestCodexEventsStopsOnFirstSinkFailure(t *testing.T) {
+	for _, sink := range []string{"log", "output", "thread"} {
+		t.Run(sink, func(t *testing.T) {
+			failure := errors.New("sink failed")
+			stops := 0
+			events := &codexEvents{log: io.Discard, out: io.Discard, stop: func() { stops++ }}
+			switch sink {
+			case "log":
+				events.log = failingEventWriter{failure}
+			case "output":
+				events.out = failingEventWriter{failure}
+			case "thread":
+				events.onThread = func(string) error { return failure }
+			}
+			for range 2 {
+				if _, err := events.Write([]byte(`{"type":"thread.started","thread_id":"t-1"}` + "\n")); !errors.Is(err, failure) {
+					t.Fatalf("err=%v", err)
+				}
+			}
+			if err := events.Flush(); !errors.Is(err, failure) || stops != 1 {
+				t.Fatalf("err=%v stops=%d", err, stops)
+			}
+		})
 	}
 }

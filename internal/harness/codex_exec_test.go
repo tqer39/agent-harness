@@ -326,3 +326,70 @@ func TestImplementReturnsCancelDuringMCPList(t *testing.T) {
 		t.Fatalf("err=%v", err)
 	}
 }
+
+// 次のラウンドでリンク先を上書きせず、実体の schema を用意する。
+func TestImplementDoesNotFollowSchemaLinks(t *testing.T) {
+	for _, link := range []string{"directory", "symlink", "hardlink"} {
+		t.Run(link, func(t *testing.T) {
+			work, outside := t.TempDir(), t.TempDir()
+			target := filepath.Join(outside, "sentinel")
+			if err := os.WriteFile(target, []byte("keep"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			run := filepath.Join(work, ".agent-run")
+			if link == "directory" {
+				if err := os.Symlink(outside, run); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				if err := os.Mkdir(run, 0700); err != nil {
+					t.Fatal(err)
+				}
+				makeLink := os.Symlink
+				if link == "hardlink" {
+					makeLink = os.Link
+				}
+				if err := makeLink(target, filepath.Join(run, "result.schema.json")); err != nil {
+					t.Fatal(err)
+				}
+			}
+			runner := &scriptRunner{responses: map[string]response{codexMCP: {out: `[]`}, codexExec: {files: resultFiles(0)}}}
+			codex, _ := codexFor(t, runner)
+			for range 2 {
+				if _, err := codex.Implement(context.Background(), &Record{RunID: "r1"}, work, "task", time.Minute); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if body, err := os.ReadFile(target); err != nil || string(body) != "keep" {
+				t.Fatalf("target=%q err=%v", body, err)
+			}
+			if _, err := os.Stat(filepath.Join(outside, "result.schema.json")); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("write escaped: %v", err)
+			}
+			if body, err := os.ReadFile(filepath.Join(run, "result.schema.json")); err != nil || string(body) != ResultSchema {
+				t.Fatalf("schema=%q err=%v", body, err)
+			}
+		})
+	}
+}
+
+type sinkFailureRunner struct{ canceled bool }
+
+func (r *sinkFailureRunner) Run(ctx context.Context, cmd Cmd) (string, error) {
+	if cmd.Stdout == nil {
+		return "[]", nil
+	}
+	_, err := cmd.Stdout.Write([]byte(threadOK))
+	r.canceled = errors.Is(ctx.Err(), context.Canceled)
+	return "", err
+}
+func TestImplementCancelsWhenThreadSaveFails(t *testing.T) {
+	runner := &sinkFailureRunner{}
+	codex, _ := codexFor(t, runner)
+	saveErr := errors.New("cannot persist thread")
+	codex.Save = func(*Record) error { return saveErr }
+	_, err := codex.Implement(context.Background(), &Record{RunID: "r1"}, t.TempDir(), "task", time.Minute)
+	if !errors.Is(err, saveErr) || !runner.canceled {
+		t.Fatalf("err=%v canceled=%v", err, runner.canceled)
+	}
+}

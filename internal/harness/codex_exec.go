@@ -109,10 +109,27 @@ func (c *CodexExec) Implement(ctx context.Context, rec *Record, work, prompt str
 		return ImplReport{}, err
 	}
 	run := filepath.Join(work, ".agent-run")
+	// 前のラウンドが残したリンクをホスト側の書き込みでたどらない。
+	if info, err := os.Lstat(run); err == nil && info.Mode()&os.ModeSymlink != 0 {
+		if err := os.Remove(run); err != nil {
+			return ImplReport{}, err
+		}
+	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return ImplReport{}, err
+	}
 	if err := os.MkdirAll(run, 0o700); err != nil {
 		return ImplReport{}, err
 	}
-	if err := os.WriteFile(filepath.Join(run, "result.schema.json"), []byte(ResultSchema), 0o600); err != nil {
+	schemaPath := filepath.Join(run, "result.schema.json")
+	if err := os.Remove(schemaPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return ImplReport{}, err
+	}
+	schema, err := os.OpenFile(schemaPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return ImplReport{}, err
+	}
+	_, writeErr := schema.Write([]byte(ResultSchema))
+	if err := errors.Join(writeErr, schema.Close()); err != nil {
 		return ImplReport{}, err
 	}
 	// ReadResult は run_id と round しか見ないので、前の実行が残した同じ round の結果を消す。
@@ -138,7 +155,7 @@ func (c *CodexExec) Implement(ctx context.Context, rec *Record, work, prompt str
 		}
 		return c.Save(rec)
 	}
-	events := &codexEvents{log: log, out: c.Out, work: work, onThread: onThread}
+	events := &codexEvents{log: log, out: c.Out, work: work, onThread: onThread, stop: cancel}
 	fmt.Fprintf(c.Out, "実装: round %d を開始します\n", rec.Round)
 	_, runErr := c.Run.Run(runCtx, Cmd{Dir: work, Name: c.Codex, Args: c.implementArgs(rec, work, disabled), Env: c.env(work), Stdin: prompt, Stdout: events})
 	if err := events.Flush(); err != nil {

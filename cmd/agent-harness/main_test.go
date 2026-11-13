@@ -4,6 +4,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"os"
 	"strings"
@@ -255,5 +256,28 @@ func TestRunContinuesWhenCodexUpdateFails(t *testing.T) {
 	// 今の CLI でモデルを使えるので、更新の失敗では止まらず build まで進む。
 	if err == nil || !strings.Contains(err.Error(), "claude") || !strings.Contains(out.String(), "今の版で続けます") {
 		t.Fatalf("out=%s err=%v", out.String(), err)
+	}
+}
+
+func TestPreflightHonorsCancellation(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	t.Setenv("PATH", dir)
+	for _, name := range []string{"mise", "codex"} {
+		if err := os.WriteFile(dir+"/"+name, []byte("#!/bin/sh\necho must-not-run > "+dir+"/ran\n"), 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	var out bytes.Buffer
+	if err := updateCodex(ctx, &out); !errors.Is(err, context.Canceled) {
+		t.Fatalf("update err=%v", err)
+	}
+	if err := checkModel(ctx, "chatgpt", "m"); err == nil {
+		t.Fatal("model check ignored cancellation")
+	}
+	if _, err := os.Stat(dir + "/ran"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("preflight process ran: %v", err)
 	}
 }
