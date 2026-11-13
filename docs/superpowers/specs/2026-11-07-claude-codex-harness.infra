@@ -1,0 +1,54 @@
+diagram "Claude と Codex の開発ハーネス" version=1 {
+  business.lane human "人間" {
+    flow.start request "作業を依頼"
+    flow.activity approve_criteria "受入条件を承認"
+    flow.activity decide "停止した PR を判断"
+    flow.end finished_by_human "人間が完了"
+  }
+  business.lane requirements "Claude（要件定義）" {
+    flow.activity define_criteria "要件と受入条件を整理"
+  }
+  business.lane harness "ハーネス（秘密情報を扱う唯一の実行者）" {
+    flow.activity start_run "作業用 clone と実行記録を作成"
+    flow.activity collect_patch "差分を専用 clone に適用"
+    flow.decision scan "秘密情報とセキュリティ検査"
+    flow.activity open_pr "短命トークンで push と PR 作成"
+    flow.decision check_verdict "判定と SHA は一致か"
+    flow.activity arm_merge "SHA を固定して auto-merge"
+    flow.activity revert "revert PR を作成して自動マージ"
+    flow.activity stop "needs-human を付けて停止"
+    flow.end merged "完了"
+  }
+  business.lane implementer "実装担当（既定は Codex）" {
+    flow.activity implement "サンドボックスで実装と検証"
+  }
+  business.lane reviewer "レビュー担当（実装者と別のモデル）" {
+    flow.activity review "基準ブランチから差分を読み取り専用で確認"
+  }
+  business.lane github "GitHub" {
+    flow.decision ci "CI は成功か"
+    flow.decision post_merge "main の CI とスモークは成功か"
+  }
+  request -> define_criteria kind=flow
+  define_criteria -> approve_criteria kind=flow label="受入条件を提示"
+  approve_criteria -> start_run kind=flow label="承認"
+  start_run -> implement kind=flow label="Herdr で起動"
+  implement -> collect_patch kind=flow label="完了を報告"
+  collect_patch -> scan kind=flow
+  scan -> open_pr kind=flow label="問題なし"
+  scan -> stop kind=flow label="検出"
+  open_pr -> ci kind=flow
+  ci -> review kind=flow label="成功"
+  ci -> implement kind=flow label="失敗（2 回まで修正）"
+  review -> check_verdict kind=flow label="判定 JSON"
+  check_verdict -> arm_merge kind=flow label="合格"
+  check_verdict -> implement kind=flow label="指摘（2 回まで修正）"
+  check_verdict -> stop kind=flow label="セキュリティ指摘か不一致"
+  arm_merge -> post_merge kind=flow
+  post_merge -> merged kind=flow label="成功"
+  post_merge -> revert kind=flow label="失敗"
+  revert -> decide kind=flow label="原因を確認"
+  stop -> decide kind=flow
+  decide -> finished_by_human kind=flow
+  view service level=resource direction=DOWN
+}
