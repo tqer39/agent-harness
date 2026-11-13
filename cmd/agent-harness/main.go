@@ -13,9 +13,11 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 	"time"
 
 	harnessassets "github.com/tqer39/agent-harness/harness"
@@ -146,7 +148,7 @@ func installProfile() error {
 }
 
 func resolve(name string) (string, error) {
-	// Herdr の PATH には mise の実行ファイルが入らないので、絶対パスで渡す。
+	// 実行時の PATH に左右されないよう、絶対パスで渡す。
 	path, err := exec.LookPath(name)
 	if err != nil {
 		return "", fmt.Errorf("%s が見つかりません: %w", name, err)
@@ -184,8 +186,8 @@ func commandOutput(limit time.Duration, name string, args ...string) (string, er
 	return result, nil
 }
 
-// realPath は mise の shim を実体に解決する。shim のまま渡すと、Herdr の端末では
-// PATH の別の版に切り替わることがある。解決できなければ別の版で動かさず失敗させる。
+// realPath は mise の shim を実体に解決する。shim のまま渡すと、作業用 clone の mise の設定で
+// 別の版に切り替わることがある。解決できなければ別の版で動かさず失敗させる。
 func realPath(path, name string, which func(string) (string, error)) (string, error) {
 	if !strings.Contains(path, "/mise/shims/") {
 		return path, nil
@@ -197,7 +199,7 @@ func realPath(path, name string, which func(string) (string, error)) (string, er
 	return real, nil
 }
 
-func build(repo, codexAuth string) (*harness.Orchestrator, error) {
+func build(repo, codexAuth string, out io.Writer) (*harness.Orchestrator, error) {
 	codexHome, err := codexHomeFor(codexAuth)
 	if err != nil {
 		return nil, err
@@ -211,7 +213,7 @@ func build(repo, codexAuth string) (*harness.Orchestrator, error) {
 		return nil, err
 	}
 	paths := map[string]string{}
-	for _, name := range []string{"hc", "codex", "claude", "op", "gh", "git", "mise"} {
+	for _, name := range []string{"codex", "claude", "op", "gh", "git", "mise"} {
 		path, err := resolve(name)
 		if err != nil {
 			return nil, err
@@ -238,9 +240,18 @@ func build(repo, codexAuth string) (*harness.Orchestrator, error) {
 	if err := os.MkdirAll(root, 0o700); err != nil {
 		return nil, err
 	}
+	store := harness.Store{Root: root}
 	return &harness.Orchestrator{
-		Store:         harness.Store{Root: root},
-		Agents:        &harness.Herdr{Run: runner, HC: paths["hc"], Codex: paths["codex"], Claude: paths["claude"], Poll: 5 * time.Second, CodexHome: codexHome},
+		Store: store,
+		Agents: &harness.CodexExec{
+			Run:       runner,
+			Codex:     paths["codex"],
+			Claude:    paths["claude"],
+			CodexHome: codexHome,
+			Events:    filepath.Join(root, "runs"),
+			Out:       out,
+			Save:      store.Save,
+		},
 		Tree:          tree,
 		Forge:         &harness.GitHub{Run: runner, Tokens: tokens, Repo: repo, Poll: 15 * time.Second},
 		Scanner:       scanner(runner, paths["mise"], root),
@@ -315,7 +326,7 @@ func runCommand(args []string, out io.Writer) error {
 	if err := checkModel(*codexAuth, selected.Model); err != nil {
 		return err
 	}
-	orchestrator, err := build(*repo, *codexAuth)
+	orchestrator, err := build(*repo, *codexAuth, out)
 	if err != nil {
 		return err
 	}
@@ -327,7 +338,10 @@ func runCommand(args []string, out io.Writer) error {
 		Status: harness.StatusImplementing,
 	}
 	fmt.Fprintf(out, "実行 ID: %s\n", rec.RunID)
-	err = orchestrator.Run(context.Background(), rec, acceptance, *approved)
+	// 子プロセスは別のプロセスグループで動くので、シグナルを context のキャンセルに変えて止める。
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
+	defer stop()
+	err = orchestrator.Run(ctx, rec, acceptance, *approved)
 	return report(out, rec, err)
 }
 
@@ -396,11 +410,14 @@ func resumeCommand(args []string, out io.Writer) error {
 		return err
 	}
 	// 再開でも同じ認証を使う。別の方式に切り替えると課金先が変わるためである。
-	orchestrator, err := build(rec.Repo, rec.CodexAuth)
+	orchestrator, err := build(rec.Repo, rec.CodexAuth, out)
 	if err != nil {
 		return err
 	}
-	return report(out, rec, orchestrator.Resume(context.Background(), rec))
+	// 子プロセスは別のプロセスグループで動くので、シグナルを context のキャンセルに変えて止める。
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
+	defer stop()
+	return report(out, rec, orchestrator.Resume(ctx, rec))
 }
 
 func reconcileCommand(args []string, out io.Writer) error {
@@ -412,11 +429,14 @@ func reconcileCommand(args []string, out io.Writer) error {
 	if *repo == "" {
 		return errors.New("--repo は必須です")
 	}
-	orchestrator, err := build(*repo, "")
+	orchestrator, err := build(*repo, "", out)
 	if err != nil {
 		return err
 	}
-	if err := orchestrator.Reconcile(context.Background(), *repo); err != nil {
+	// 子プロセスは別のプロセスグループで動くので、シグナルを context のキャンセルに変えて止める。
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
+	defer stop()
+	if err := orchestrator.Reconcile(ctx, *repo); err != nil {
 		return err
 	}
 	fmt.Fprintln(out, "未確認のマージを処理しました。")
@@ -478,7 +498,7 @@ func doctor(args []string, out io.Writer) error {
 		}
 		fmt.Fprintf(out, "PASS %s\n", name)
 	}
-	for _, name := range []string{"hc", "codex", "claude", "op", "gh", "git", "mise"} {
+	for _, name := range []string{"codex", "claude", "op", "gh", "git", "mise"} {
 		_, err := resolve(name)
 		check(name, err)
 	}

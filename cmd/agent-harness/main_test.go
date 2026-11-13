@@ -213,7 +213,7 @@ func TestRunUpdatesCodexBeforeCheckingModel(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	// hc などを置かず、build の実行ファイルの解決で確実に止める。
+	// claude などを置かず、build の実行ファイルの解決で確実に止める。
 	t.Setenv("PATH", dir)
 	task := dir + "/task.md"
 	if err := os.WriteFile(task, []byte("x\n"), 0o644); err != nil {
@@ -221,7 +221,7 @@ func TestRunUpdatesCodexBeforeCheckingModel(t *testing.T) {
 	}
 	var out bytes.Buffer
 	err := dispatch([]string{"run", "--repo", "o/n", "--title", "t", "--task-file", task, "--criteria-file", task, "--approved-by-human"}, &out)
-	if err == nil || !strings.Contains(err.Error(), "hc") {
+	if err == nil || !strings.Contains(err.Error(), "claude") {
 		t.Fatalf("run must stop at build: %v", err)
 	}
 	if !strings.Contains(out.String(), "0.148.0 から 0.167.0 に更新") {
@@ -253,7 +253,7 @@ func TestRunContinuesWhenCodexUpdateFails(t *testing.T) {
 	var out bytes.Buffer
 	err := dispatch([]string{"run", "--repo", "o/n", "--title", "t", "--task-file", task, "--criteria-file", task, "--approved-by-human"}, &out)
 	// 今の CLI でモデルを使えるので、更新の失敗では止まらず build まで進む。
-	if err == nil || !strings.Contains(err.Error(), "hc") || !strings.Contains(out.String(), "今の版で続けます") {
+	if err == nil || !strings.Contains(err.Error(), "claude") || !strings.Contains(out.String(), "今の版で続けます") {
 		t.Fatalf("out=%s err=%v", out.String(), err)
 	}
 }

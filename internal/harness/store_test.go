@@ -7,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-	"time"
 )
 
 func TestStoreRoundTripUsesPrivateFile(t *testing.T) {
@@ -75,13 +74,6 @@ func TestStopFlag(t *testing.T) {
 	}
 	if reason, _ := store.Stopped("o/n"); reason != "" {
 		t.Fatalf("reason=%q", reason)
-	}
-}
-
-func TestNewRunIDFitsHerdrNameLimit(t *testing.T) {
-	id := NewRunID(time.Date(2026, 11, 9, 6, 1, 2, 0, time.UTC))
-	if len("review-"+id) > 32 {
-		t.Fatalf("too long: %s", id)
 	}
 }
 

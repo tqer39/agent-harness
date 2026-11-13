@@ -18,26 +18,22 @@ type fakeAgents struct {
 	sent         []string
 	started      int
 	reviewed     int
-	closed       int
 	prompts      []string
 }
 
-func (f *fakeAgents) StartImplementer(context.Context, *Record, string, string) error {
-	f.started++
-	return nil
-}
-func (f *fakeAgents) SendImplementer(_ context.Context, _ *Record, text string) error {
-	f.sent = append(f.sent, text)
-	return nil
-}
-func (f *fakeAgents) CloseImplementer(context.Context, *Record)               { f.closed++ }
-func (f *fakeAgents) ImplementerAlive(context.Context, *Record) (bool, error) { return true, nil }
-func (f *fakeAgents) WaitImplementer(context.Context, *Record, string, time.Duration) (ImplOutcome, Result, error) {
+// Implement は新しい thread の起動を started、同じ thread への送信を sent に数える。
+func (f *fakeAgents) Implement(_ context.Context, rec *Record, _, prompt string, _ time.Duration) (ImplReport, error) {
+	if rec.ThreadID == "" {
+		f.started++
+		rec.ThreadID = "thread-1"
+	} else {
+		f.sent = append(f.sent, prompt)
+	}
 	outcome := ImplDone
 	if len(f.implOutcomes) > 0 {
 		outcome, f.implOutcomes = f.implOutcomes[0], f.implOutcomes[1:]
 	}
-	return outcome, Result{Status: "done"}, nil
+	return ImplReport{Outcome: outcome, Result: Result{Status: "done"}}, nil
 }
 func (f *fakeAgents) Review(_ context.Context, _ *Record, _, prompt string, _ time.Duration) (ReviewOutcome, []byte, error) {
 	f.reviewed++
@@ -374,15 +370,15 @@ func TestMainCheckTimeoutKeepsMergeUnchecked(t *testing.T) {
 	}
 }
 
-func TestResumeContinuesRunningImplementer(t *testing.T) {
+func TestResumeContinuesSameThread(t *testing.T) {
 	agents := &fakeAgents{reviews: [][]byte{[]byte(passVerdict)}}
 	forge := &fakeForge{mergeResult: "merge"}
 	orchestrator, rec := newOrchestrator(t, agents, &fakeTree{}, forge, fakeScanner{})
-	rec.Status, rec.BaseSHA, rec.AcceptanceSHA = StatusWaitingQuota, "base", "base"
+	rec.Status, rec.BaseSHA, rec.AcceptanceSHA, rec.ThreadID = StatusWaitingQuota, "base", "base", "thread-1"
 	if err := orchestrator.Resume(context.Background(), rec); err != nil {
 		t.Fatal(err)
 	}
-	if agents.started != 0 || len(agents.sent) != 1 || rec.Status != StatusCompleted {
+	if agents.started != 0 || len(agents.sent) != 1 || !strings.Contains(agents.sent[0], "利用枠が回復しました") || rec.Status != StatusCompleted {
 		t.Fatalf("started=%d sent=%v status=%s", agents.started, agents.sent, rec.Status)
 	}
 }
@@ -754,23 +750,6 @@ func TestChangedFedThreadIsFedAgain(t *testing.T) {
 	}
 }
 
-func TestImplementerIsClosedOnlyAfterMerge(t *testing.T) {
-	agents := &fakeAgents{reviews: [][]byte{[]byte(passVerdict)}}
-	orchestrator, rec := newOrchestrator(t, agents, &fakeTree{}, &fakeForge{mergeResult: "merge"}, fakeScanner{})
-	if err := orchestrator.Run(context.Background(), rec, nil, true); err != nil {
-		t.Fatal(err)
-	}
-	if agents.closed != 1 {
-		t.Fatalf("closed=%d", agents.closed)
-	}
-	// 停止したときは、人間が確認できるよう端末を残す。
-	stopped := &fakeAgents{}
-	orchestrator, rec = newOrchestrator(t, stopped, &fakeTree{}, &fakeForge{}, fakeScanner{leak: true})
-	if err := orchestrator.Run(context.Background(), rec, nil, true); !errors.Is(err, ErrStopped) || stopped.closed != 0 {
-		t.Fatalf("err=%v closed=%d", err, stopped.closed)
-	}
-}
-
 func TestReviewFailureReportsReason(t *testing.T) {
 	agents := &fakeAgents{reviewOut: ReviewFailed, failure: []byte(`{"is_error":true,"result":"API Error: 古い版です"}`)}
 	forge := &fakeForge{}
@@ -778,5 +757,37 @@ func TestReviewFailureReportsReason(t *testing.T) {
 	err := orchestrator.Run(context.Background(), rec, nil, true)
 	if !errors.Is(err, ErrStopped) || !strings.Contains(rec.StopReason, "古い版です") {
 		t.Fatalf("err=%v reason=%q", err, rec.StopReason)
+	}
+}
+
+func TestImplementerFailureStops(t *testing.T) {
+	agents := &fakeAgents{implOutcomes: []ImplOutcome{ImplFailed}}
+	orchestrator, rec := newOrchestrator(t, agents, &fakeTree{}, &fakeForge{}, fakeScanner{})
+	err := orchestrator.Run(context.Background(), rec, nil, true)
+	if !errors.Is(err, ErrStopped) || !strings.Contains(rec.StopReason, "エラーで止まりました") {
+		t.Fatalf("err=%v reason=%q", err, rec.StopReason)
+	}
+}
+
+func TestThreadIsSavedBeforeQuotaWait(t *testing.T) {
+	agents := &fakeAgents{implOutcomes: []ImplOutcome{ImplQuota}}
+	orchestrator, rec := newOrchestrator(t, agents, &fakeTree{}, &fakeForge{}, fakeScanner{})
+	if err := orchestrator.Run(context.Background(), rec, nil, true); !errors.Is(err, ErrQuota) {
+		t.Fatalf("err=%v", err)
+	}
+	stored, err := orchestrator.Store.Load("r1")
+	if err != nil || stored.ThreadID != "thread-1" {
+		t.Fatalf("stored=%+v err=%v", stored, err)
+	}
+}
+
+func TestRepairIsSentToSameThread(t *testing.T) {
+	agents := &fakeAgents{reviews: [][]byte{[]byte(repairVerdict), []byte(passVerdict)}}
+	orchestrator, rec := newOrchestrator(t, agents, &fakeTree{}, &fakeForge{mergeResult: "merge"}, fakeScanner{})
+	if err := orchestrator.Run(context.Background(), rec, nil, true); err != nil {
+		t.Fatal(err)
+	}
+	if agents.started != 1 || len(agents.sent) != 1 || !strings.Contains(agents.sent[0], "最後の応答の round を 1 にしてください") {
+		t.Fatalf("started=%d sent=%v", agents.started, agents.sent)
 	}
 }

@@ -366,9 +366,9 @@ func TestImplementerAndVerifyShareMiseState(t *testing.T) {
 	if !slices.Contains(runner.calls[0].Env, "MISE_STATE_DIR=/work/.agent-run/cache/mise-state") {
 		t.Fatalf("verify env=%v", runner.calls[0].Env)
 	}
-	args := (&Herdr{Codex: "codex"}).implementerArgs(&Record{RunID: "r1", Model: "m", Effort: "low"}, "/work", "p", nil)
-	if !slices.Contains(args, "MISE_STATE_DIR=/work/.agent-run/cache/mise-state") {
-		t.Fatalf("implementer args=%v", args)
+	env := (&CodexExec{}).env("/work")
+	if !slices.Contains(env, "MISE_STATE_DIR=/work/.agent-run/cache/mise-state") {
+		t.Fatalf("implementer env=%v", env)
 	}
 }
 
