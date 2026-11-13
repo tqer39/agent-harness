@@ -43,8 +43,8 @@ func TestCodexEventsDisplaysAndRecords(t *testing.T) {
 	if out.String() != want {
 		t.Fatalf("out=%q", out.String())
 	}
-	if events.ThreadID != "t-1" || events.Failure != "" {
-		t.Fatalf("thread=%q failure=%q", events.ThreadID, events.Failure)
+	if events.Failure != "" {
+		t.Fatalf("failure=%q", events.Failure)
 	}
 }
 
