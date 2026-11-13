@@ -1,0 +1,49 @@
+[bootstrap]
+run = "go mod download"
+
+[lint]
+run = "go vet ./..."
+
+[format]
+run = "go fmt ./..."
+
+["format:check"]
+run = "./.standards/cache/dev-standards format-check"
+run_windows = '.\.standards\cache\dev-standards.exe format-check'
+
+[test]
+run = "go test ./..."
+
+[build]
+run = "go build -o bin/ ./..."
+
+[check]
+depends = ["standards:check", "lint", "format:check", "test"]
+
+["standards:check"]
+run = "./.standards/cache/dev-standards check"
+run_windows = '.\.standards\cache\dev-standards.exe check'
+
+["standards:plan"]
+run = "./.standards/cache/dev-standards plan"
+run_windows = '.\.standards\cache\dev-standards.exe plan'
+
+["standards:verify"]
+run = "./.standards/cache/dev-standards verify"
+run_windows = '.\.standards\cache\dev-standards.exe verify'
+
+["standards:version"]
+description = "ロックに記録した dev-standards の適用版を表示"
+run = """{% set lock = read_json(path='.standards/lock.json') %}{% if lock.version is matching(pat="^[0-9]+[.][0-9]+[.][0-9]+$") %}echo "dev-standards 適用版: {{ lock.version }}"{% else %}exit 2{% endif %}"""
+
+["standards:prepare"]
+run = "./.standards/cache/dev-standards prepare"
+run_windows = '.\.standards\cache\dev-standards.exe prepare'
+
+["standards:finish"]
+run = "./.standards/cache/dev-standards finish"
+run_windows = '.\.standards\cache\dev-standards.exe finish'
+
+["standards:feedback"]
+run = "./.standards/cache/dev-standards feedback"
+run_windows = '.\.standards\cache\dev-standards.exe feedback'

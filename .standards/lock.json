@@ -1,0 +1,9 @@
+{
+  "schemaVersion": 1,
+  "repository": "tqer39/dev-standards",
+  "version": "0.4.9",
+  "bundleSha256": "caa1255bf339b6cb50044f72bbe04c913ee198813a1d01c4104db93e8b154abe",
+  "gitignoreSha256": "630b7d047b9506e68b4a08db643d18055b3fa41bd39a81e7c13f07b44d25ab7d",
+  "gitignoreUrl": "https://www.toptal.com/developers/gitignore/api/go,linux,macos,windows",
+  "goVersion": "1.27.3"
+}
