@@ -18,26 +18,25 @@ type fakeAgents struct {
 	sent         []string
 	started      int
 	reviewed     int
-	closed       int
 	prompts      []string
+	implPrompts  []string
+	detail       string
 }
 
-func (f *fakeAgents) StartImplementer(context.Context, *Record, string, string) error {
-	f.started++
-	return nil
-}
-func (f *fakeAgents) SendImplementer(_ context.Context, _ *Record, text string) error {
-	f.sent = append(f.sent, text)
-	return nil
-}
-func (f *fakeAgents) CloseImplementer(context.Context, *Record)               { f.closed++ }
-func (f *fakeAgents) ImplementerAlive(context.Context, *Record) (bool, error) { return true, nil }
-func (f *fakeAgents) WaitImplementer(context.Context, *Record, string, time.Duration) (ImplOutcome, Result, error) {
+// Implement は新しい thread の起動を started、同じ thread への送信を sent に数える。
+func (f *fakeAgents) Implement(_ context.Context, rec *Record, _, prompt string, _ time.Duration) (ImplReport, error) {
+	f.implPrompts = append(f.implPrompts, prompt)
+	if rec.ThreadID == "" {
+		f.started++
+		rec.ThreadID = "thread-1"
+	} else {
+		f.sent = append(f.sent, prompt)
+	}
 	outcome := ImplDone
 	if len(f.implOutcomes) > 0 {
 		outcome, f.implOutcomes = f.implOutcomes[0], f.implOutcomes[1:]
 	}
-	return outcome, Result{Status: "done"}, nil
+	return ImplReport{Outcome: outcome, Result: Result{Status: "done"}, Detail: f.detail}, nil
 }
 func (f *fakeAgents) Review(_ context.Context, _ *Record, _, prompt string, _ time.Duration) (ReviewOutcome, []byte, error) {
 	f.reviewed++
@@ -60,6 +59,9 @@ type fakeTree struct {
 	commits     int
 	reverted    bool
 	pushErr     error
+	verifyErr   error
+	onVerify    func()
+	onPush      func()
 }
 
 func (f *fakeTree) PathsFor(*Record) Paths {
@@ -70,6 +72,12 @@ func (f *fakeTree) Prepare(_ context.Context, rec *Record, _ []byte) (Paths, err
 	return f.PathsFor(rec), nil
 }
 func (f *fakeTree) Verify(context.Context, string, []string) (bool, string, error) {
+	if f.onVerify != nil {
+		f.onVerify()
+	}
+	if f.verifyErr != nil {
+		return false, "", f.verifyErr
+	}
 	if f.verifyFails > 0 {
 		f.verifyFails--
 		return false, "failed", nil
@@ -85,7 +93,12 @@ func (f *fakeTree) Commit(context.Context, *Record) (string, error) {
 	f.commits++
 	return "abc", nil
 }
-func (f *fakeTree) Push(context.Context, *Record, string) error { return f.pushErr }
+func (f *fakeTree) Push(context.Context, *Record, string) error {
+	if f.onPush != nil {
+		f.onPush()
+	}
+	return f.pushErr
+}
 func (f *fakeTree) StagedPatch(context.Context, *Record) (string, error) {
 	return "diff", nil
 }
@@ -374,15 +387,15 @@ func TestMainCheckTimeoutKeepsMergeUnchecked(t *testing.T) {
 	}
 }
 
-func TestResumeContinuesRunningImplementer(t *testing.T) {
+func TestResumeContinuesSameThread(t *testing.T) {
 	agents := &fakeAgents{reviews: [][]byte{[]byte(passVerdict)}}
 	forge := &fakeForge{mergeResult: "merge"}
 	orchestrator, rec := newOrchestrator(t, agents, &fakeTree{}, forge, fakeScanner{})
-	rec.Status, rec.BaseSHA, rec.AcceptanceSHA = StatusWaitingQuota, "base", "base"
+	rec.Status, rec.BaseSHA, rec.AcceptanceSHA, rec.ThreadID = StatusWaitingQuota, "base", "base", "thread-1"
 	if err := orchestrator.Resume(context.Background(), rec); err != nil {
 		t.Fatal(err)
 	}
-	if agents.started != 0 || len(agents.sent) != 1 || rec.Status != StatusCompleted {
+	if agents.started != 0 || len(agents.sent) != 1 || !strings.Contains(agents.sent[0], "中断した作業を再開します") || rec.Status != StatusCompleted {
 		t.Fatalf("started=%d sent=%v status=%s", agents.started, agents.sent, rec.Status)
 	}
 }
@@ -576,8 +589,9 @@ func TestResumeRecoversInterruptedRun(t *testing.T) {
 	if err := orchestrator.Resume(context.Background(), rec); err != nil {
 		t.Fatal(err)
 	}
-	if rec.Status != StatusCompleted {
-		t.Fatalf("status=%s", rec.Status)
+	// thread がないので、新しい thread で最初から実装する。
+	if rec.Status != StatusCompleted || agents.started != 1 || len(agents.sent) != 0 {
+		t.Fatalf("status=%s started=%d sent=%v", rec.Status, agents.started, agents.sent)
 	}
 }
 
@@ -754,23 +768,6 @@ func TestChangedFedThreadIsFedAgain(t *testing.T) {
 	}
 }
 
-func TestImplementerIsClosedOnlyAfterMerge(t *testing.T) {
-	agents := &fakeAgents{reviews: [][]byte{[]byte(passVerdict)}}
-	orchestrator, rec := newOrchestrator(t, agents, &fakeTree{}, &fakeForge{mergeResult: "merge"}, fakeScanner{})
-	if err := orchestrator.Run(context.Background(), rec, nil, true); err != nil {
-		t.Fatal(err)
-	}
-	if agents.closed != 1 {
-		t.Fatalf("closed=%d", agents.closed)
-	}
-	// 停止したときは、人間が確認できるよう端末を残す。
-	stopped := &fakeAgents{}
-	orchestrator, rec = newOrchestrator(t, stopped, &fakeTree{}, &fakeForge{}, fakeScanner{leak: true})
-	if err := orchestrator.Run(context.Background(), rec, nil, true); !errors.Is(err, ErrStopped) || stopped.closed != 0 {
-		t.Fatalf("err=%v closed=%d", err, stopped.closed)
-	}
-}
-
 func TestReviewFailureReportsReason(t *testing.T) {
 	agents := &fakeAgents{reviewOut: ReviewFailed, failure: []byte(`{"is_error":true,"result":"API Error: 古い版です"}`)}
 	forge := &fakeForge{}
@@ -778,5 +775,115 @@ func TestReviewFailureReportsReason(t *testing.T) {
 	err := orchestrator.Run(context.Background(), rec, nil, true)
 	if !errors.Is(err, ErrStopped) || !strings.Contains(rec.StopReason, "古い版です") {
 		t.Fatalf("err=%v reason=%q", err, rec.StopReason)
+	}
+}
+
+func TestImplementerFailureStops(t *testing.T) {
+	agents := &fakeAgents{implOutcomes: []ImplOutcome{ImplFailed}}
+	orchestrator, rec := newOrchestrator(t, agents, &fakeTree{}, &fakeForge{}, fakeScanner{})
+	err := orchestrator.Run(context.Background(), rec, nil, true)
+	if !errors.Is(err, ErrStopped) || !strings.Contains(rec.StopReason, "エラーで止まりました") {
+		t.Fatalf("err=%v reason=%q", err, rec.StopReason)
+	}
+}
+
+func TestThreadIsSavedBeforeVerifyError(t *testing.T) {
+	// Verify のエラーは保存せずに返るので、thread は Implement の直後の保存だけで残る。
+	tree := &fakeTree{verifyErr: errors.New("verify crashed")}
+	orchestrator, rec := newOrchestrator(t, &fakeAgents{}, tree, &fakeForge{}, fakeScanner{})
+	if err := orchestrator.Run(context.Background(), rec, nil, true); err == nil {
+		t.Fatal("verify error must be returned")
+	}
+	stored, err := orchestrator.Store.Load("r1")
+	if err != nil || stored.ThreadID != "thread-1" {
+		t.Fatalf("stored=%+v err=%v", stored, err)
+	}
+}
+
+func TestRepairIsSentToSameThread(t *testing.T) {
+	agents := &fakeAgents{reviews: [][]byte{[]byte(repairVerdict), []byte(passVerdict)}}
+	orchestrator, rec := newOrchestrator(t, agents, &fakeTree{}, &fakeForge{mergeResult: "merge"}, fakeScanner{})
+	if err := orchestrator.Run(context.Background(), rec, nil, true); err != nil {
+		t.Fatal(err)
+	}
+	if agents.started != 1 || len(agents.sent) != 1 || !strings.Contains(agents.sent[0], "最後の応答の round を 1 にしてください") {
+		t.Fatalf("started=%d sent=%v", agents.started, agents.sent)
+	}
+}
+
+func TestCancelKeepsRunResumable(t *testing.T) {
+	for name, setup := range map[string]func(*fakeTree, context.CancelFunc){
+		"push": func(tree *fakeTree, cancel context.CancelFunc) {
+			tree.onPush = cancel
+			tree.pushErr = context.Canceled
+		},
+		"verify": func(tree *fakeTree, cancel context.CancelFunc) {
+			// OSRunner は止めた検証を失敗として返すので、修正の依頼と区別できない。
+			tree.onVerify = cancel
+			tree.verifyFails = 1
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			tree := &fakeTree{}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			setup(tree, cancel)
+			agents := &fakeAgents{reviews: [][]byte{[]byte(passVerdict)}}
+			orchestrator, rec := newOrchestrator(t, agents, tree, &fakeForge{mergeResult: "merge"}, fakeScanner{})
+			if err := orchestrator.Run(ctx, rec, nil, true); !errors.Is(err, context.Canceled) {
+				t.Fatalf("err=%v", err)
+			}
+			stored, err := orchestrator.Store.Load("r1")
+			if err != nil || stored.Status != StatusImplementing || stored.Repairs != 0 || stored.Round != 0 || stored.StopReason != "" {
+				t.Fatalf("stored=%+v err=%v", stored, err)
+			}
+		})
+	}
+}
+
+func TestCancelWhileWaitingMergeDoesNotStop(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	agents := &fakeAgents{reviews: [][]byte{[]byte(passVerdict)}}
+	forge := &fakeForge{onArm: cancel, mergeErr: context.Canceled}
+	orchestrator, rec := newOrchestrator(t, agents, &fakeTree{}, forge, fakeScanner{})
+	if err := orchestrator.Run(ctx, rec, nil, true); !errors.Is(err, context.Canceled) || errors.Is(err, ErrStopped) {
+		t.Fatalf("err=%v", err)
+	}
+	stored, err := orchestrator.Store.Load("r1")
+	if err != nil || stored.Status != StatusMergeArmed || stored.StopReason != "" || len(forge.needsHuman) != 0 {
+		t.Fatalf("stored=%+v needsHuman=%v err=%v", stored, forge.needsHuman, err)
+	}
+}
+
+func TestImplementerStopReasonIsShort(t *testing.T) {
+	agents := &fakeAgents{implOutcomes: []ImplOutcome{ImplExited}}
+	orchestrator, rec := newOrchestrator(t, agents, &fakeTree{}, &fakeForge{}, fakeScanner{})
+	if err := orchestrator.Run(context.Background(), rec, nil, true); !errors.Is(err, ErrStopped) || rec.StopReason != "実装担当が結果を返さずに終了しました。" {
+		t.Fatalf("err=%v reason=%q", err, rec.StopReason)
+	}
+	// Detail は PR のコメントにも載るので、末尾だけを残す。
+	agents = &fakeAgents{implOutcomes: []ImplOutcome{ImplFailed}, detail: strings.Repeat("x", 5000) + "end"}
+	orchestrator, rec = newOrchestrator(t, agents, &fakeTree{}, &fakeForge{}, fakeScanner{})
+	if err := orchestrator.Run(context.Background(), rec, nil, true); !errors.Is(err, ErrStopped) || len(rec.StopReason) > 1100 || !strings.HasSuffix(rec.StopReason, "end") {
+		t.Fatalf("err=%v len=%d", err, len(rec.StopReason))
+	}
+}
+
+func TestResumeLegacyReviewIncludesTaskInNewThread(t *testing.T) {
+	agents := &fakeAgents{reviews: [][]byte{[]byte(repairVerdict), []byte(passVerdict)}}
+	orchestrator, rec := newOrchestrator(t, agents, &fakeTree{}, &fakeForge{mergeResult: "merge"}, fakeScanner{})
+	rec.ReviewPending, rec.HeadSHA, rec.PR = true, "abc", 1
+	rec.Task, rec.Criteria, rec.Pinned = "legacy task", "c", []string{"fixed_test.go"}
+	if err := orchestrator.Resume(context.Background(), rec); err != nil {
+		t.Fatal(err)
+	}
+	if len(agents.implPrompts) != 1 {
+		t.Fatalf("prompts=%v", agents.implPrompts)
+	}
+	for _, want := range []string{rec.Task, rec.Criteria, "fixed_test.go", rec.RunID, "直す"} {
+		if !strings.Contains(agents.implPrompts[0], want) {
+			t.Errorf("missing %q: %s", want, agents.implPrompts[0])
+		}
 	}
 }

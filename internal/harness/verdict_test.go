@@ -3,8 +3,10 @@
 package harness
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -84,5 +86,19 @@ func TestMissingCriteria(t *testing.T) {
 	missing := verdict.MissingCriteria("- 条件A\n- 条件B")
 	if len(missing) != 1 || missing[0] != "条件B" {
 		t.Fatalf("missing=%v", missing)
+	}
+}
+
+func TestResultSchemaMatchesResult(t *testing.T) {
+	var schema struct {
+		Required   []string                   `json:"required"`
+		Properties map[string]json.RawMessage `json:"properties"`
+	}
+	if err := json.Unmarshal([]byte(ResultSchema), &schema); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"run_id", "round", "status", "summary"}
+	if !slices.Equal(schema.Required, want) || len(schema.Properties) != len(want) {
+		t.Fatalf("schema=%+v", schema)
 	}
 }

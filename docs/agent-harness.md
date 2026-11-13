@@ -37,7 +37,14 @@ bin/agent-harness run \
 ```
 
 固定する受入テストがあれば `--acceptance-patch tests.patch` を追加する。
-実装担当の画面は Herdr で `impl-<run_id>` として確認できる。
+実装担当とレビュー担当の経過は、`run` を実行した端末に 1 行ずつ表示する。
+実装担当のイベントは `~/.local/state/agent-harness/runs/<run_id>.events.jsonl` に残る。
+実装担当、レビュー担当、検証のコマンドは別のプロセスグループで動く。
+`run`、`resume`、`reconcile` は Ctrl-C、SIGTERM、端末を閉じたとき（SIGHUP）に子プロセスをグループごと止める。
+実行記録は `implementing` のまま残るので、`resume` で同じ thread から続けられる。
+2 回目の Ctrl-C は即時に終了する。
+子プロセスは端末から見てバックグラウンドで動くので、端末を直接読む入力（パスワードやパスフレーズの入力など）を求めるコマンドは止まったままになる。
+無人で動かす前提なので、認証は事前に済ませておく。
 
 `run` は作業の前に、mise の Codex CLI（`npm:@openai/codex`）が古ければ `mise upgrade` で更新する。更新できなくても、今の版でモデルを使えれば続ける。
 `run` と `doctor` は、`--model`（既定は `gpt-6.1-sol`）を `codex debug models` の一覧で確認する。

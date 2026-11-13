@@ -7,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-	"time"
 )
 
 func TestStoreRoundTripUsesPrivateFile(t *testing.T) {
@@ -78,13 +77,6 @@ func TestStopFlag(t *testing.T) {
 	}
 }
 
-func TestNewRunIDFitsHerdrNameLimit(t *testing.T) {
-	id := NewRunID(time.Date(2026, 11, 9, 6, 1, 2, 0, time.UTC))
-	if len("review-"+id) > 32 {
-		t.Fatalf("too long: %s", id)
-	}
-}
-
 func TestRecordJSONKeysAreStableForTelemetry(t *testing.T) {
 	data, err := json.Marshal(Record{RunID: "r", PR: 1})
 	if err != nil {
@@ -114,5 +106,17 @@ func TestRepoKeysIgnoreCase(t *testing.T) {
 	}
 	if _, err := store.Lock("owner/NAME"); err == nil {
 		t.Fatal("lock must not depend on case")
+	}
+}
+
+func TestRecordKeepsThreadID(t *testing.T) {
+	store := Store{Root: t.TempDir()}
+	rec := &Record{RunID: "r1", Repo: "o/n", Status: StatusImplementing, ThreadID: "thread-1"}
+	if err := store.Save(rec); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := store.Load("r1")
+	if err != nil || loaded.ThreadID != "thread-1" {
+		t.Fatalf("loaded=%+v err=%v", loaded, err)
 	}
 }

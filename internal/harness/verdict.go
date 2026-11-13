@@ -20,6 +20,9 @@ type Result struct {
 	Summary string `json:"summary"`
 }
 
+// ResultSchema は実装担当の最後の応答の形である。codex exec の --output-schema に渡す。
+const ResultSchema = `{"type":"object","additionalProperties":false,"required":["run_id","round","status","summary"],"properties":{"run_id":{"type":"string"},"round":{"type":"integer"},"status":{"type":"string","enum":["done","blocked"]},"summary":{"type":"string"}}}`
+
 func ReadResult(workdir, runID string, round int) (Result, bool, error) {
 	data, err := os.ReadFile(filepath.Join(workdir, ".agent-run", "result.json"))
 	if errors.Is(err, os.ErrNotExist) {
