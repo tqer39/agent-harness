@@ -21,6 +21,8 @@ const (
 	ImplBlocked
 	ImplExited
 	ImplTimeout
+	// ImplFailed は turn.failed や error のイベントで止まったことを表す。本文は ImplReport.Detail にある。
+	ImplFailed
 )
 
 type ReviewOutcome int
