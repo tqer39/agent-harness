@@ -133,7 +133,7 @@ func (o *Orchestrator) Resume(ctx context.Context, rec *Record) error {
 	}
 	prompt := implementerPrompt(rec)
 	if rec.ThreadID != "" {
-		prompt = fmt.Sprintf("利用枠が回復しました。作業を続けてください。完了したら、最後の応答の round を %d にしてください。", rec.Round)
+		prompt = fmt.Sprintf("中断した作業を再開します。作業を続けてください。完了したら、最後の応答の round を %d にしてください。", rec.Round)
 	}
 	return o.loop(ctx, rec, paths, prompt)
 }
@@ -171,6 +171,10 @@ func (o *Orchestrator) loop(ctx context.Context, rec *Record, paths Paths, promp
 		if err != nil {
 			return err
 		}
+		// 取り消しで止めた検証は失敗として返るので、修正回数を使わずに resume で続けられる状態のまま返す。
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if feedback == "" {
 			return nil
 		}
@@ -196,13 +200,19 @@ func (o *Orchestrator) round(ctx context.Context, rec *Record, paths Paths, prom
 	if err := o.Store.Save(rec); err != nil {
 		return "", err
 	}
+	// Detail は PR のコメントにも載るので、末尾だけを残す。
+	detail := tail(report.Detail, 1000)
 	switch report.Outcome {
 	case ImplQuota:
 		return "", o.waitQuota(rec)
 	case ImplFailed:
-		return "", o.stop(ctx, rec, "実装担当がエラーで止まりました: "+report.Detail)
+		return "", o.stop(ctx, rec, "実装担当がエラーで止まりました: "+detail)
 	case ImplExited:
-		return "", o.stop(ctx, rec, "実装担当が結果を返さずに終了しました。\n\n"+report.Detail)
+		reason := "実装担当が結果を返さずに終了しました。"
+		if detail != "" {
+			reason += "\n\n" + detail
+		}
+		return "", o.stop(ctx, rec, reason)
 	case ImplTimeout:
 		return "", o.stop(ctx, rec, "実装の時間上限に達しました。")
 	}
@@ -431,6 +441,10 @@ func (o *Orchestrator) merge(ctx context.Context, rec *Record, config RepoConfig
 	defer cancel()
 	sha, err := o.Forge.WaitMerged(mergeCtx, rec.PR, rec.HeadSHA)
 	if err != nil {
+		// 取り消しでの失敗は人間の判断待ちにせず、merge_armed のまま reconcile で確認できるようにする。
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		reason := "マージを確認できません: " + err.Error()
 		rec.StopReason = reason
 		markErr := o.Forge.MarkNeedsHuman(ctx, rec.PR, reason)
@@ -575,6 +589,10 @@ func (o *Orchestrator) stopLocal(rec *Record, reason string) error {
 }
 
 func (o *Orchestrator) stop(ctx context.Context, rec *Record, reason string) error {
+	// 取り消しでの失敗は人間の判断待ちにせず、resume で続けられる状態のまま返す。
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if rec.PR != 0 {
 		if err := o.Forge.MarkNeedsHuman(ctx, rec.PR, reason); err != nil {
 			return errors.Join(err, o.stopLocal(rec, reason))

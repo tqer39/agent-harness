@@ -24,7 +24,7 @@ const (
 	ReviewTimeout
 )
 
-// Codex の画面には「You have 1 usage limit reset available」が常に出るので、
+// Codex の出力には「You have 1 usage limit reset available」が常に出るので、
 // "usage limit" だけでは一致させず、上限に達したことを示す表現に限る。
 var quotaPattern = regexp.MustCompile(`(?i)hit your [\w ]*limit|usage limit (reached|exceeded)|rate limit reached|out of (credits|usage)|insufficient_quota|exceeded your current quota`)
 

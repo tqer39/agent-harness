@@ -262,6 +262,15 @@ func build(repo, codexAuth string, out io.Writer) (*harness.Orchestrator, error)
 	}, nil
 }
 
+// signalContext はシグナルで取り消される context を返す。
+// 子プロセスは別のプロセスグループで動くので、シグナルを context のキャンセルに変えて止める。
+func signalContext() (context.Context, context.CancelFunc) {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
+	// 1 回目のシグナルの後は既定の動作に戻し、2 回目の Ctrl-C で強制終了できるようにする。
+	go func() { <-ctx.Done(); stop() }()
+	return ctx, stop
+}
+
 // scanner は版を固定して betterleaks を起動する。
 // mise の shim はプロジェクトの外で版を決められず失敗するので、直接は使わない。
 func scanner(runner harness.Runner, mise, dir string) harness.Betterleaks {
@@ -338,8 +347,7 @@ func runCommand(args []string, out io.Writer) error {
 		Status: harness.StatusImplementing,
 	}
 	fmt.Fprintf(out, "実行 ID: %s\n", rec.RunID)
-	// 子プロセスは別のプロセスグループで動くので、シグナルを context のキャンセルに変えて止める。
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
+	ctx, stop := signalContext()
 	defer stop()
 	err = orchestrator.Run(ctx, rec, acceptance, *approved)
 	return report(out, rec, err)
@@ -414,8 +422,7 @@ func resumeCommand(args []string, out io.Writer) error {
 	if err != nil {
 		return err
 	}
-	// 子プロセスは別のプロセスグループで動くので、シグナルを context のキャンセルに変えて止める。
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
+	ctx, stop := signalContext()
 	defer stop()
 	return report(out, rec, orchestrator.Resume(ctx, rec))
 }
@@ -433,8 +440,7 @@ func reconcileCommand(args []string, out io.Writer) error {
 	if err != nil {
 		return err
 	}
-	// 子プロセスは別のプロセスグループで動くので、シグナルを context のキャンセルに変えて止める。
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
+	ctx, stop := signalContext()
 	defer stop()
 	if err := orchestrator.Reconcile(ctx, *repo); err != nil {
 		return err
