@@ -5,6 +5,7 @@ package harness
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -275,5 +276,53 @@ func TestCodexReviewTimesOut(t *testing.T) {
 	outcome, _, err := codex.Review(context.Background(), &Record{RunID: "r1", ReviewerModel: "m"}, "/review", "p", 20*time.Millisecond)
 	if err != nil || outcome != ReviewTimeout {
 		t.Fatalf("outcome=%v err=%v", outcome, err)
+	}
+}
+
+// resultThenBlockRunner は結果を書いた後、キャンセルまで戻らない。
+type resultThenBlockRunner struct{ round int }
+
+func (r resultThenBlockRunner) Run(ctx context.Context, c Cmd) (string, error) {
+	if strings.Contains(strings.Join(c.Args, " "), "mcp list") {
+		return "[]", nil
+	}
+	for name, body := range resultFiles(r.round) {
+		if err := os.WriteFile(filepath.Join(c.Dir, name), []byte(body), 0o600); err != nil {
+			return "", err
+		}
+	}
+	<-ctx.Done()
+	return "", &RunError{Name: c.Name, Code: -1}
+}
+
+// 結果が書かれていれば、後始末で時間上限を越えても完了として扱う。
+func TestImplementPrefersResultOverTimeout(t *testing.T) {
+	codex, _ := codexFor(t, resultThenBlockRunner{})
+	report, err := codex.Implement(context.Background(), &Record{RunID: "r1"}, t.TempDir(), "task", 50*time.Millisecond)
+	if err != nil || report.Outcome != ImplDone {
+		t.Fatalf("report=%+v err=%v", report, err)
+	}
+}
+
+// 失敗の本文があるときは、stderr の一時的な 429 などで quota と誤判定しない。
+func TestImplementIgnoresStderrWhenFailureHasBody(t *testing.T) {
+	runner := &scriptRunner{responses: map[string]response{
+		codexMCP:  {out: `[]`},
+		codexExec: {stream: `{"type":"error","message":"model is not supported"}` + "\n", err: &RunError{Code: 1, Stderr: "rate limit reached"}},
+	}}
+	codex, _ := codexFor(t, runner)
+	report, err := codex.Implement(context.Background(), &Record{RunID: "r1"}, t.TempDir(), "task", time.Minute)
+	if err != nil || report.Outcome != ImplFailed {
+		t.Fatalf("report=%+v err=%v", report, err)
+	}
+}
+
+func TestImplementReturnsCancelDuringMCPList(t *testing.T) {
+	codex, _ := codexFor(t, blockingRunner{})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := codex.Implement(ctx, &Record{RunID: "r1"}, t.TempDir(), "task", time.Minute)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err=%v", err)
 	}
 }

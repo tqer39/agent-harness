@@ -100,7 +100,10 @@ func (c *CodexExec) Implement(ctx context.Context, rec *Record, work, prompt str
 	defer cancel()
 	disabled, err := c.enabledMCP(runCtx)
 	if err != nil {
-		if ctx.Err() == nil && runCtx.Err() != nil {
+		if ctx.Err() != nil {
+			return ImplReport{}, ctx.Err()
+		}
+		if runCtx.Err() != nil {
 			return ImplReport{Outcome: ImplTimeout}, nil
 		}
 		return ImplReport{}, err
@@ -144,6 +147,13 @@ func (c *CodexExec) Implement(ctx context.Context, rec *Record, work, prompt str
 	if ctx.Err() != nil {
 		return ImplReport{}, ctx.Err()
 	}
+	// 子孫の後始末で上限を越えても、結果が書かれていれば完了として扱う。
+	// 再接続などの一時的なエラーの後に完了することもあるので、結果を先に確かめる。
+	// 書き込み途中なら解析に失敗するので、結果を優先しても取り違えない。
+	result, ok, readErr := ReadResult(work, rec.RunID, rec.Round)
+	if readErr == nil && ok {
+		return ImplReport{Outcome: ImplDone, Result: result}, nil
+	}
 	if runCtx.Err() != nil {
 		return ImplReport{Outcome: ImplTimeout}, nil
 	}
@@ -151,19 +161,19 @@ func (c *CodexExec) Implement(ctx context.Context, rec *Record, work, prompt str
 	if runErr != nil && !errors.As(runErr, &exitErr) {
 		return ImplReport{}, runErr
 	}
-	// 再接続などの一時的なエラーの後に完了することがあるので、結果を先に確かめる。
-	result, ok, err := ReadResult(work, rec.RunID, rec.Round)
-	if err != nil {
-		return ImplReport{}, err
-	}
-	if ok {
-		return ImplReport{Outcome: ImplDone, Result: result}, nil
+	if readErr != nil {
+		return ImplReport{}, readErr
 	}
 	stderr := ""
 	if exitErr != nil {
 		stderr = exitErr.Stderr
 	}
-	if quotaPattern.MatchString(events.Failure) || quotaPattern.MatchString(stderr) {
+	// 失敗の本文があれば本文だけで判定し、stderr の一時的な 429 などで取り違えない。
+	quotaText := events.Failure
+	if quotaText == "" {
+		quotaText = stderr
+	}
+	if quotaPattern.MatchString(quotaText) {
 		return ImplReport{Outcome: ImplQuota}, nil
 	}
 	if events.Failure != "" {
