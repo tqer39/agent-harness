@@ -25,7 +25,6 @@ type codexEvents struct {
 	// stop は記録や表示が失敗したとき、子プロセスを直ちに止める。
 	stop func()
 
-	ThreadID string
 	// Failure は turn.failed と最上位の error の本文である。最後のものを残す。
 	Failure string
 }
@@ -112,7 +111,6 @@ func (e *codexEvents) handle(line []byte) error {
 func (e *codexEvents) describe(event codexEvent) string {
 	switch event.Type {
 	case "thread.started":
-		e.ThreadID = event.ThreadID
 		return "thread " + event.ThreadID
 	case "turn.failed":
 		if event.Error != nil {

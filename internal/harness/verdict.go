@@ -33,7 +33,7 @@ func ReadResult(workdir, runID string, round int) (Result, bool, error) {
 	}
 	var result Result
 	if err := json.Unmarshal(data, &result); err != nil {
-		// 書き込み途中の可能性があるので、次の確認まで待つ。
+		// 解析できない結果は、結果なしとして扱う。
 		return Result{}, false, nil
 	}
 	if result.RunID != runID || result.Round != round {
