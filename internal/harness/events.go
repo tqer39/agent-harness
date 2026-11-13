@@ -23,7 +23,6 @@ type codexEvents struct {
 	// err は最初の処理エラーである。exec はプロセスの終了エラーを優先して返すので、Flush で返す。
 	err error
 
-	ThreadID string
 	// Failure は turn.failed と最上位の error の本文である。最後のものを残す。
 	Failure string
 }
@@ -107,7 +106,6 @@ func (e *codexEvents) handle(line []byte) error {
 func (e *codexEvents) describe(event codexEvent) string {
 	switch event.Type {
 	case "thread.started":
-		e.ThreadID = event.ThreadID
 		return "thread " + event.ThreadID
 	case "turn.failed":
 		if event.Error != nil {
