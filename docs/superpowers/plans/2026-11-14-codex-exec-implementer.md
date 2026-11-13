@@ -66,21 +66,26 @@ git switch -c refactor/codex-exec
 
 | ファイル | 変更 | 責務 |
 | --- | --- | --- |
-| `internal/harness/runner.go` | 変更 | `Cmd.Stdout` で標準出力を逐次渡す。終了の待機を打ち切る |
+| `internal/harness/runner.go` | 変更 | `Cmd.Stdout` で標準出力を逐次渡す。子プロセスをグループごと止める |
 | `internal/harness/events.go` | 新規 | JSONL の記録、1 行ずつの表示、thread_id と失敗の本文の保持 |
 | `internal/harness/codex_exec.go` | 新規 | `CodexExec`。実装担当とレビュー担当の起動と結果の判定 |
 | `internal/harness/agent.go` | 変更 | `Herdr` を削除し、結果の種類、利用上限の表現、レビューの引数だけを残す |
 | `internal/harness/orchestrate.go` | 変更 | `Agents` を `Implement` と `Review` に絞り、指示を引数で渡す |
 | `internal/harness/store.go` | 変更 | `Record.ThreadID` |
 | `internal/harness/verdict.go` | 変更 | `ResultSchema` |
-| `cmd/agent-harness/main.go` | 変更 | `CodexExec` を組み立てる。`hc` を解決しない |
+| `cmd/agent-harness/main.go` | 変更 | `CodexExec` を組み立てる。`hc` を解決しない。シグナルで子プロセスを止める |
 | `docs/agent-harness.md` | 変更 | 実装担当の画面の説明 |
 
 テストは同じ名前の `_test.go` に置く。
 
 ---
 
-## Task 1: Runner で標準出力を逐次渡す
+## Task 1: Runner で標準出力を逐次渡し、子孫のプロセスも止める
+
+`CommandContext` は時間切れで直接の子だけを止める。実装担当のシェルなどの子孫が残ると、排他を外した後も作業用 clone を書き換え続ける。
+子プロセスを別のプロセスグループにし、キャンセル時と終了後にグループごと止める。
+グループを分けると端末の Ctrl-C が子に届かなくなるので、Task 5 でシグナルを context のキャンセルに変える。
+Codex が自分で別のセッションを作って起動したコマンドには、グループの停止が届かない。この制限は残る。
 
 **Files:**
 
@@ -89,7 +94,7 @@ git switch -c refactor/codex-exec
 
 - [ ] **Step 1: 失敗するテストを書く**
 
-`internal/harness/runner_test.go` の末尾に追加する。import に `bytes` を加える。
+`internal/harness/runner_test.go` の末尾に追加する。import に `bytes`、`path/filepath`、`strconv`、`syscall`、`time` を加える。
 
 ```go
 func TestOSRunnerStreamsStdout(t *testing.T) {
@@ -108,12 +113,50 @@ func TestOSRunnerDropsOrcaVariables(t *testing.T) {
 		t.Fatalf("out=%q err=%v", out, err)
 	}
 }
+
+func TestOSRunnerStopsDescendantsOnCancel(t *testing.T) {
+	pidFile := filepath.Join(t.TempDir(), "pid")
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	_, _ = OSRunner{}.Run(ctx, Cmd{Name: "sh", Args: []string{"-c", "sleep 30 >/dev/null 2>&1 & echo $! > " + pidFile + "; wait"}})
+	assertStopped(t, pidFile)
+}
+
+func TestOSRunnerStopsDescendantsLeftAfterExit(t *testing.T) {
+	pidFile := filepath.Join(t.TempDir(), "pid")
+	if _, err := OSRunner{}.Run(context.Background(), Cmd{Name: "sh", Args: []string{"-c", "sleep 30 >/dev/null 2>&1 & echo $! > " + pidFile}}); err != nil {
+		t.Fatal(err)
+	}
+	assertStopped(t, pidFile)
+}
+
+func assertStopped(t *testing.T, pidFile string) {
+	t.Helper()
+	data, err := os.ReadFile(pidFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// シグナルの配送と回収は非同期なので、少し待つ。
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if err := syscall.Kill(pid, 0); errors.Is(err, syscall.ESRCH) {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	_ = syscall.Kill(pid, syscall.SIGKILL)
+	t.Fatalf("process %d is still running", pid)
+}
 ```
 
 - [ ] **Step 2: 失敗を確かめる**
 
 Run: `mise exec -- go test ./internal/harness -run 'TestOSRunner' -count=1`
-Expected: `unknown field Stdout in struct literal` でコンパイルに失敗する。
+Expected: `unknown field Stdout in struct literal` でコンパイルに失敗する。`Stdout` の追加だけでは、子孫を止める 2 つのテストが `is still running` で失敗する。
 
 - [ ] **Step 3: 実装する**
 
@@ -144,12 +187,19 @@ type Cmd struct {
 		cmd.Stdout = c.Stdout
 	}
 	cmd.Stderr = &stderr
-	// 実装担当のシェルが出力を開いたまま残ると Wait が戻らないので、待機を打ち切る。
+	// 子孫のプロセスもまとめて止められるよう、プロセスグループを分ける。
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
+	// 子孫が出力を開いたまま残ると Wait が戻らないので、待機を打ち切る。
 	cmd.WaitDelay = 5 * time.Second
 	err := cmd.Run()
+	if cmd.Process != nil {
+		// 終了後に残った子孫が作業用 clone を書き換え続けないよう、グループごと止める。
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	}
 ```
 
-import に `io` と `time` を加える。
+import に `io`、`syscall`、`time` を加える。
 
 - [ ] **Step 4: 成功を確かめる**
 
@@ -160,7 +210,7 @@ Expected: `ok`
 
 ```bash
 git add internal/harness/runner.go internal/harness/runner_test.go
-git commit -m "✨ feat: Runner で標準出力を逐次受け取れるようにする"
+git commit -m "✨ feat: Runner で標準出力を逐次受け取り、子孫のプロセスも止める"
 ```
 
 ## Task 2: thread_id と結果のスキーマを持つ
@@ -321,6 +371,22 @@ func TestCodexEventsKeepsFailure(t *testing.T) {
 	}
 }
 
+func TestCodexEventsReportsThreadWhenItStarts(t *testing.T) {
+	var log, out bytes.Buffer
+	var got []string
+	events := &codexEvents{log: &log, out: &out, onThread: func(id string) error {
+		got = append(got, id)
+		return nil
+	}}
+	// 改行で終わった時点で通知し、プロセスの終了を待たない。
+	if _, err := events.Write([]byte(`{"type":"thread.started","thread_id":"t-1"}` + "\n")); err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0] != "t-1" {
+		t.Fatalf("got=%v", got)
+	}
+}
+
 func TestCodexEventsShowsNonJSONLines(t *testing.T) {
 	var log, out bytes.Buffer
 	events := &codexEvents{log: &log, out: &out, work: "/work"}
@@ -363,6 +429,8 @@ type codexEvents struct {
 	work string
 	// pending は改行で終わっていない受信途中の行である。
 	pending []byte
+	// onThread は thread.started を受け取った時点で呼ぶ。中断されても thread を残せるようにする。
+	onThread func(string) error
 
 	ThreadID string
 	// Failure は turn.failed と最上位の error の本文である。最後のものを残す。
@@ -424,6 +492,11 @@ func (e *codexEvents) handle(line []byte) error {
 		// JSON でない行も失わないよう、そのまま表示する。
 		_, err := fmt.Fprintln(e.out, e.relative(string(line)))
 		return err
+	}
+	if event.Type == "thread.started" && e.onThread != nil {
+		if err := e.onThread(event.ThreadID); err != nil {
+			return err
+		}
 	}
 	text := e.describe(event)
 	if text == "" {
@@ -513,7 +586,7 @@ git commit -m "✨ feat: codex exec のイベントを記録して 1 行ずつ�
 
 - [ ] **Step 1: テスト用の Runner を広げる**
 
-`internal/harness/fake_test.go` を次の内容にする。キーは最も長く一致する「コマンド名と先頭の引数」を使い、`stream` は `Cmd.Stdout` に書く。既存のキー（「コマンド名」と「コマンド名 第 1 引数」）はそのまま使える。
+`internal/harness/fake_test.go` を次の内容にする。キーは最も長く一致する「コマンド名と先頭の引数」を使う。`stream` は `Cmd.Stdout` に書き、`files` は `Cmd.Dir` の下に書く。既存のキー（「コマンド名」と「コマンド名 第 1 引数」）はそのまま使える。
 
 ```go
 //go:build !windows
@@ -523,6 +596,8 @@ package harness
 import (
 	"context"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 )
 
@@ -531,6 +606,8 @@ type response struct {
 	err error
 	// stream は Cmd.Stdout が指定されたときに書く標準出力である。
 	stream string
+	// files は実行中に子プロセスが書くファイルである。キーは Cmd.Dir からの相対パス。
+	files map[string]string
 }
 
 // scriptRunner は「コマンド名 引数...」の最も長く一致する前方部分、なければコマンド名で応答を決める。
@@ -546,6 +623,15 @@ func (r *scriptRunner) Run(_ context.Context, c Cmd) (string, error) {
 		if match, ok := r.responses[c.Name+" "+strings.Join(c.Args[:n], " ")]; ok {
 			res = match
 			break
+		}
+	}
+	for name, body := range res.files {
+		path := filepath.Join(c.Dir, name)
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			return "", err
+		}
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			return "", err
 		}
 	}
 	if c.Stdout != nil && res.stream != "" {
@@ -570,11 +656,11 @@ func (r *scriptRunner) called(name string, parts ...string) bool {
 	return false
 }
 
-// blockingRunner は MCP の一覧にだけ答え、ほかはキャンセルまで戻らない。
-type blockingRunner struct{}
+// blockingRunner はキャンセルまで戻らない。listMCP なら MCP の一覧にだけすぐ答える。
+type blockingRunner struct{ listMCP bool }
 
-func (blockingRunner) Run(ctx context.Context, c Cmd) (string, error) {
-	if strings.Contains(strings.Join(c.Args, " "), "mcp list") {
+func (r blockingRunner) Run(ctx context.Context, c Cmd) (string, error) {
+	if r.listMCP && strings.Contains(strings.Join(c.Args, " "), "mcp list") {
 		return "[]", nil
 	}
 	<-ctx.Done()
@@ -597,6 +683,7 @@ package harness
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -604,6 +691,11 @@ import (
 	"testing"
 	"time"
 )
+
+// resultFiles は実装担当が最後の応答として書く結果である。
+func resultFiles(round int) map[string]string {
+	return map[string]string{".agent-run/result.json": fmt.Sprintf(`{"run_id":"r1","round":%d,"status":"done","summary":"s"}`, round)}
+}
 
 const (
 	codexMCP  = "/abs/codex -p agent-harness mcp"
@@ -641,10 +733,9 @@ func execCall(t *testing.T, runner *scriptRunner) Cmd {
 
 func TestImplementRunsCodexExecWithProfile(t *testing.T) {
 	work := t.TempDir()
-	writeResult(t, work, `{"run_id":"r1","round":0,"status":"done","summary":"s"}`)
 	runner := &scriptRunner{responses: map[string]response{
 		codexMCP:  {out: `[{"name":"context7","enabled":true},{"name":"off","enabled":false}]`},
-		codexExec: {stream: threadOK},
+		codexExec: {stream: threadOK, files: resultFiles(0)},
 	}}
 	codex, out := codexFor(t, runner)
 	rec := &Record{RunID: "r1", Model: "gpt-6.1-sol", Effort: "high"}
@@ -693,8 +784,7 @@ func TestImplementRunsCodexExecWithProfile(t *testing.T) {
 
 func TestImplementResumesThread(t *testing.T) {
 	work := t.TempDir()
-	writeResult(t, work, `{"run_id":"r1","round":1,"status":"done","summary":"s"}`)
-	runner := &scriptRunner{responses: map[string]response{codexMCP: {out: `[]`}}}
+	runner := &scriptRunner{responses: map[string]response{codexMCP: {out: `[]`}, codexExec: {files: resultFiles(1)}}}
 	codex, _ := codexFor(t, runner)
 	rec := &Record{RunID: "r1", Round: 1, Model: "m", Effort: "low", ThreadID: "t-1"}
 	report, err := codex.Implement(context.Background(), rec, work, "fix", time.Minute)
@@ -709,8 +799,7 @@ func TestImplementResumesThread(t *testing.T) {
 
 func TestImplementUsesDedicatedCodexHome(t *testing.T) {
 	work := t.TempDir()
-	writeResult(t, work, `{"run_id":"r1","round":0,"status":"done","summary":"s"}`)
-	runner := &scriptRunner{responses: map[string]response{codexMCP: {out: `[]`}}}
+	runner := &scriptRunner{responses: map[string]response{codexMCP: {out: `[]`}, codexExec: {files: resultFiles(0)}}}
 	codex, _ := codexFor(t, runner)
 	codex.CodexHome = "/state/codex-api-home"
 	if _, err := codex.Implement(context.Background(), &Record{RunID: "r1"}, work, "task", time.Minute); err != nil {
@@ -764,10 +853,9 @@ func TestImplementReportsExitWithoutResult(t *testing.T) {
 
 func TestImplementPrefersResultOverTransientError(t *testing.T) {
 	work := t.TempDir()
-	writeResult(t, work, `{"run_id":"r1","round":0,"status":"done","summary":"s"}`)
 	runner := &scriptRunner{responses: map[string]response{
 		codexMCP:  {out: `[]`},
-		codexExec: {stream: `{"type":"error","message":"Reconnecting... 1/5"}` + "\n"},
+		codexExec: {stream: `{"type":"error","message":"Reconnecting... 1/5"}` + "\n", files: resultFiles(0)},
 	}}
 	codex, _ := codexFor(t, runner)
 	report, err := codex.Implement(context.Background(), &Record{RunID: "r1"}, work, "task", time.Minute)
@@ -777,10 +865,55 @@ func TestImplementPrefersResultOverTransientError(t *testing.T) {
 }
 
 func TestImplementTimesOut(t *testing.T) {
+	codex, _ := codexFor(t, blockingRunner{listMCP: true})
+	report, err := codex.Implement(context.Background(), &Record{RunID: "r1"}, t.TempDir(), "task", 20*time.Millisecond)
+	if err != nil || report.Outcome != ImplTimeout {
+		t.Fatalf("report=%+v err=%v", report, err)
+	}
+}
+
+// MCP の一覧の取得が止まっても、ラウンドの時間上限で打ち切る。
+func TestImplementBoundsMCPListByRoundLimit(t *testing.T) {
 	codex, _ := codexFor(t, blockingRunner{})
 	report, err := codex.Implement(context.Background(), &Record{RunID: "r1"}, t.TempDir(), "task", 20*time.Millisecond)
 	if err != nil || report.Outcome != ImplTimeout {
 		t.Fatalf("report=%+v err=%v", report, err)
+	}
+}
+
+// 前の実行が残した同じ round の結果を、今回の結果と取り違えない。
+func TestImplementRemovesPreviousResult(t *testing.T) {
+	work := t.TempDir()
+	writeResult(t, work, `{"run_id":"r1","round":0,"status":"done","summary":"old"}`)
+	runner := &scriptRunner{responses: map[string]response{
+		codexMCP:  {out: `[]`},
+		codexExec: {err: &RunError{Code: 1, Stderr: "boom"}},
+	}}
+	codex, _ := codexFor(t, runner)
+	report, err := codex.Implement(context.Background(), &Record{RunID: "r1"}, work, "task", time.Minute)
+	if err != nil || report.Outcome != ImplExited {
+		t.Fatalf("report=%+v err=%v", report, err)
+	}
+}
+
+// 中断されても同じ thread で再開できるよう、thread.started を受け取った時点で記録する。
+func TestImplementSavesThreadWhenItStarts(t *testing.T) {
+	runner := &scriptRunner{responses: map[string]response{
+		codexMCP:  {out: `[]`},
+		codexExec: {stream: threadOK, err: &RunError{Code: 1}},
+	}}
+	codex, _ := codexFor(t, runner)
+	var saved []string
+	codex.Save = func(rec *Record) error {
+		saved = append(saved, rec.ThreadID)
+		return nil
+	}
+	rec := &Record{RunID: "r1"}
+	if _, err := codex.Implement(context.Background(), rec, t.TempDir(), "task", time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if len(saved) != 1 || saved[0] != "t-1" || rec.ThreadID != "t-1" {
+		t.Fatalf("saved=%v thread=%q", saved, rec.ThreadID)
 	}
 }
 
@@ -878,6 +1011,8 @@ type CodexExec struct {
 	Events string
 	// Out には実装とレビューの経過を表示する。
 	Out io.Writer
+	// Save が nil でなければ、thread_id を受け取った時点で実行記録を保存する。
+	Save func(*Record) error
 }
 
 func (c *CodexExec) env(work string) []string {
@@ -938,8 +1073,14 @@ func (c *CodexExec) implementArgs(rec *Record, work string, disabledMCP []string
 
 // Implement は実装担当を 1 回実行し、終了まで待つ。rec.ThreadID があれば同じ thread で続ける。
 func (c *CodexExec) Implement(ctx context.Context, rec *Record, work, prompt string, limit time.Duration) (ImplReport, error) {
-	disabled, err := c.enabledMCP(ctx)
+	// MCP の一覧の取得も含めて、ラウンドの時間上限で打ち切る。
+	runCtx, cancel := context.WithTimeout(ctx, limit)
+	defer cancel()
+	disabled, err := c.enabledMCP(runCtx)
 	if err != nil {
+		if ctx.Err() == nil && runCtx.Err() != nil {
+			return ImplReport{Outcome: ImplTimeout}, nil
+		}
 		return ImplReport{}, err
 	}
 	run := filepath.Join(work, ".agent-run")
@@ -947,6 +1088,10 @@ func (c *CodexExec) Implement(ctx context.Context, rec *Record, work, prompt str
 		return ImplReport{}, err
 	}
 	if err := os.WriteFile(filepath.Join(run, "result.schema.json"), []byte(ResultSchema), 0o600); err != nil {
+		return ImplReport{}, err
+	}
+	// ReadResult は run_id と round しか見ないので、前の実行が残した同じ round の結果を消す。
+	if err := os.Remove(filepath.Join(run, "result.json")); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return ImplReport{}, err
 	}
 	if err := os.MkdirAll(c.Events, 0o700); err != nil {
@@ -957,16 +1102,22 @@ func (c *CodexExec) Implement(ctx context.Context, rec *Record, work, prompt str
 		return ImplReport{}, err
 	}
 	defer log.Close()
-	events := &codexEvents{log: log, out: c.Out, work: work}
+	// thread は受け取った時点で記録し、中断されても同じ thread で再開できるようにする。
+	onThread := func(id string) error {
+		if rec.ThreadID != "" {
+			return nil
+		}
+		rec.ThreadID = id
+		if c.Save == nil {
+			return nil
+		}
+		return c.Save(rec)
+	}
+	events := &codexEvents{log: log, out: c.Out, work: work, onThread: onThread}
 	fmt.Fprintf(c.Out, "実装: round %d を開始します\n", rec.Round)
-	runCtx, cancel := context.WithTimeout(ctx, limit)
-	defer cancel()
 	_, runErr := c.Run.Run(runCtx, Cmd{Dir: work, Name: c.Codex, Args: c.implementArgs(rec, work, disabled), Env: c.env(work), Stdin: prompt, Stdout: events})
 	if err := events.Flush(); err != nil {
 		return ImplReport{}, err
-	}
-	if rec.ThreadID == "" {
-		rec.ThreadID = events.ThreadID
 	}
 	if ctx.Err() != nil {
 		return ImplReport{}, ctx.Err()
@@ -1352,6 +1503,7 @@ func TestQuotaPatternDetectsAPIBudgetExhaustion(t *testing.T) {
 	for _, name := range []string{"codex", "claude", "op", "gh", "git", "mise"} {
 ```
 
+- `return &harness.Orchestrator{` の前に `store := harness.Store{Root: root}` を置き、`Store: store` とする。
 - `Agents` を次にする。
 
 ```go
@@ -1362,8 +1514,21 @@ func TestQuotaPatternDetectsAPIBudgetExhaustion(t *testing.T) {
 			CodexHome: codexHome,
 			Events:    filepath.Join(root, "runs"),
 			Out:       out,
+			Save:      store.Save,
 		},
 ```
+
+- Task 1 で子プロセスを別のプロセスグループにしたので、端末の Ctrl-C や端末を閉じたときのシグナルが子に届かない。
+  `runCommand`、`resumeCommand`、`reconcileCommand` で `orchestrator.Run`、`Resume`、`Reconcile` に渡す `context.Background()` を次の `ctx` に変え、シグナルで子プロセスのグループを止める。
+  止まった実行は `implementing` のまま残り、`resume` で同じ thread から再開できる。
+
+```go
+	// 子プロセスは別のプロセスグループで動くので、シグナルを context のキャンセルに変えて止める。
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
+	defer stop()
+```
+
+  import に `os/signal` と `syscall` を加える。`main.go` は `//go:build !windows` なので、`syscall.SIGHUP` を使える。
 
 - `resolve` と `realPath` のコメントから Herdr を外す。
 
