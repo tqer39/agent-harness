@@ -5,13 +5,17 @@ package harness
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"syscall"
 )
+
+var bundlePattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 const maxPatchBytes = 5 << 20
 
@@ -150,8 +154,8 @@ func (t *GitTree) Prepare(ctx context.Context, rec *Record, acceptance []byte) (
 // サンドボックスからは GitHub に接続できないので、作業用 clone の中では取得できない。
 func (t *GitTree) copyStandardsRuntime(rec *Record, work string) error {
 	_, name, _ := strings.Cut(rec.Repo, "/")
-	source := filepath.Join(t.WorkRoot, name, ".standards", "cache", "dev-standards")
-	data, err := os.ReadFile(source)
+	checkout := filepath.Join(t.WorkRoot, name)
+	data, err := os.ReadFile(filepath.Join(checkout, ".standards", "cache", "dev-standards"))
 	if errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ENOTDIR) {
 		// dev-standards を採用していないリポジトリでは何もしない。
 		return nil
@@ -164,6 +168,11 @@ func (t *GitTree) copyStandardsRuntime(rec *Record, work string) error {
 		info, err := os.Lstat(filepath.Join(work, dir))
 		if err == nil && info.Mode()&os.ModeSymlink != 0 {
 			return fmt.Errorf("%s がシンボリックリンクなので dev-standards を配置しません", dir)
+		}
+	}
+	if runtime := lockedRuntime(checkout, work); runtime != "" {
+		if data, err = os.ReadFile(runtime); err != nil {
+			return err
 		}
 	}
 	target := filepath.Join(work, ".standards", "cache", "dev-standards")
@@ -183,6 +192,33 @@ func (t *GitTree) copyStandardsRuntime(rec *Record, work string) error {
 		err = closeErr
 	}
 	return err
+}
+
+// lockedRuntime は clone の lock.json が記録した採用版の実行ファイルを、保守ホストの状態から探す。
+// checkout のキャッシュの CLI は host.json を見て採用版に処理を任せるが、clone には host.json を置かない。
+// キャッシュの CLI をそのまま置くと、採用版と生成結果が食い違い、検査が設定の不整合で失敗する。
+// 見つからなければ空を返し、呼び出し側はキャッシュの CLI を使う。
+func lockedRuntime(checkout, work string) string {
+	var host struct {
+		State string `json:"state"`
+	}
+	data, err := os.ReadFile(filepath.Join(checkout, ".standards", "cache", "host.json"))
+	if err != nil || json.Unmarshal(data, &host) != nil || host.State == "" {
+		return ""
+	}
+	var lock struct {
+		Bundle string `json:"bundleSha256"`
+	}
+	data, err = os.ReadFile(filepath.Join(work, ".standards", "lock.json"))
+	// 値は clone の内容から来るので、パスに使う前に形式を確かめる。
+	if err != nil || json.Unmarshal(data, &lock) != nil || !bundlePattern.MatchString(lock.Bundle) {
+		return ""
+	}
+	runtime := filepath.Join(host.State, "bundles", lock.Bundle, "dev-standards")
+	if info, err := os.Stat(runtime); err != nil || !info.Mode().IsRegular() {
+		return ""
+	}
+	return runtime
 }
 
 func (t *GitTree) sandbox(ctx context.Context, dir string, env []string, command ...string) (string, error) {
