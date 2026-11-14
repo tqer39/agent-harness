@@ -42,6 +42,9 @@ extends = ":workspace"
 
 [permissions.agent-harness.network]
 enabled = true
+# httptest などのテストはループバックで待ち受けるので、許可しないと検証が必ず失敗する。
+# 0.0.0.0 での待ち受けも許すので LAN から接続される余地は残るが、外への接続は下のドメインに限ったままにする。
+allow_local_binding = true
 
 [permissions.agent-harness.network.domains]
 "proxy.golang.org" = "allow"

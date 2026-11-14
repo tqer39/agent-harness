@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	harnessassets "github.com/tqer39/agent-harness/harness"
 )
 
 func TestRunRequiresApprovalAndCriteria(t *testing.T) {
@@ -279,5 +281,29 @@ func TestPreflightHonorsCancellation(t *testing.T) {
 	}
 	if _, err := os.Stat(dir + "/ran"); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("preflight process ran: %v", err)
+	}
+}
+
+func TestSetupProfileUpgradesPreviousVersion(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	previous, err := harnessassets.PreviousCodexProfiles.ReadFile("previous/2026-11-08.config.toml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Codex が作業用 clone の信頼を書き足していても、手を加えていない旧版として扱う。
+	trust := "\n[projects.\"" + dir + "/workspace/tqer39/n-worktrees/agent-20261108-053323-f956\"]\ntrust_level = \"trusted\"\n"
+	path := dir + "/.codex/agent-harness.config.toml"
+	if err := os.MkdirAll(dir+"/.codex", 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, append(previous, trust...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := installProfile(); err != nil {
+		t.Fatalf("previous version was not upgraded: %v", err)
+	}
+	if got, _ := os.ReadFile(path); !bytes.Equal(got, harnessassets.CodexProfile) {
+		t.Fatalf("installed=%q", got)
 	}
 }
