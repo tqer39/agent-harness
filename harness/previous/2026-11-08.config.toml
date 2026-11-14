@@ -1,0 +1,57 @@
+# 実装担当の権限。秘密情報を読ませず、GitHub に接続させない。
+default_permissions = "agent-harness"
+web_search = "disabled"
+
+[features]
+network_proxy = true
+# フックはサンドボックスの外で動くので、実装担当では無効にする。
+hooks = false
+# プラグインとアプリは GitHub などへの経路を持つので、実装担当では使わない。
+plugins = false
+apps = false
+computer_use = false
+
+# MCP にはドメイン制限が効かない。サーバーごとの無効化は起動時に -c で渡す。
+
+[permissions.agent-harness]
+description = "Workspace editing with package registries only."
+extends = ":workspace"
+
+[permissions.agent-harness.filesystem]
+"~/.ssh" = "deny"
+"~/.aws" = "deny"
+"~/.config/gh" = "deny"
+"~/.config/op" = "deny"
+"~/.codex/auth.json" = "deny"
+"~/.codex/config.toml" = "deny"
+# 他のセッションの記録には、貼り付けた秘密情報が残ることがある。
+"~/.codex/sessions" = "deny"
+"~/.codex/history.jsonl" = "deny"
+# パッケージや外部サービスのトークンを持つ。npm は許可ドメインなので publish に使える。
+"~/.npmrc" = "deny"
+"~/.netrc" = "deny"
+"~/.git-credentials" = "deny"
+"~/.pypirc" = "deny"
+"~/.docker" = "deny"
+"~/.kube" = "deny"
+"~/.gnupg" = "deny"
+"~/.config/gcloud" = "deny"
+"~/.claude" = "deny"
+"~/.local/state/agent-harness" = "deny"
+"~/Library/Keychains" = "deny"
+
+[permissions.agent-harness.network]
+enabled = true
+
+[permissions.agent-harness.network.domains]
+"proxy.golang.org" = "allow"
+"sum.golang.org" = "allow"
+"registry.npmjs.org" = "allow"
+"pypi.org" = "allow"
+"files.pythonhosted.org" = "allow"
+"pkg.go.dev" = "allow"
+"docs.python.org" = "allow"
+"developer.mozilla.org" = "allow"
+"github.com" = "deny"
+"*.github.com" = "deny"
+"*.githubusercontent.com" = "deny"

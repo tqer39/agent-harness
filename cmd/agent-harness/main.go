@@ -10,6 +10,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"os"
 	"os/exec"
@@ -136,6 +137,15 @@ func installProfile() error {
 		if harness.ProfileMatches(existing, harnessassets.CodexProfile, workRoot(home)) {
 			return nil
 		}
+		previous, err := isPreviousProfile(existing, workRoot(home))
+		if err != nil {
+			return err
+		}
+		if previous {
+			// 過去に配った版のままなら利用者は手を加えていないので、確認を求めずに置き換える。
+			// Codex が書き足した作業用 clone の信頼は、実行のたびに -c で渡すので失われても困らない。
+			return os.WriteFile(path, harnessassets.CodexProfile, 0o600)
+		}
 		return fmt.Errorf("%s は内容が異なるので上書きしません。新しい版を導入するには、内容を確認してから `mv %s %s.bak` で退避し、`agent-harness setup` を再実行してください", path, path, path)
 	}
 	if !errors.Is(err, os.ErrNotExist) {
@@ -145,6 +155,24 @@ func installProfile() error {
 		return err
 	}
 	return os.WriteFile(path, harnessassets.CodexProfile, 0o600)
+}
+
+// isPreviousProfile は導入済みのファイルが、過去に配った版のどれかと一致するかを返す。
+func isPreviousProfile(existing []byte, root string) (bool, error) {
+	names, err := fs.Glob(harnessassets.PreviousCodexProfiles, "previous/*.toml")
+	if err != nil {
+		return false, err
+	}
+	for _, name := range names {
+		data, err := harnessassets.PreviousCodexProfiles.ReadFile(name)
+		if err != nil {
+			return false, err
+		}
+		if harness.ProfileMatches(existing, data, root) {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func resolve(name string) (string, error) {
