@@ -1,6 +1,6 @@
 # agent-harness の運用
 
-設計は [仕様書](superpowers/specs/2026-11-07-claude-codex-harness-design.md) を参照する。
+設計は [仕様書](superpowers/specs/2026-11-13-issue-driven-harness-design.md) を参照する。
 
 ## 初回の準備
 
