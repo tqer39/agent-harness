@@ -479,3 +479,52 @@ func TestCopyStandardsRuntimeIgnoresMissingCheckoutDirectory(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// writeStandards は利用者の checkout のキャッシュの CLI と host.json、保守ホストの採用版の実行ファイル、clone の lock.json を置く。
+func writeStandards(t *testing.T, checkout, work, bundle string, withRuntime bool) {
+	t.Helper()
+	state := t.TempDir()
+	files := map[string]string{
+		filepath.Join(checkout, ".standards", "cache", "dev-standards"): "cache",
+		filepath.Join(checkout, ".standards", "cache", "host.json"):     `{"state":"` + state + `"}`,
+		filepath.Join(work, ".standards", "lock.json"):                  `{"bundleSha256":"` + bundle + `"}`,
+	}
+	if withRuntime {
+		files[filepath.Join(state, "bundles", bundle, "dev-standards")] = "runtime"
+	}
+	for path, body := range files {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(body), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestCopyStandardsRuntimePrefersLockedBundle(t *testing.T) {
+	bundle := strings.Repeat("a", 64)
+	for name, tc := range map[string]struct {
+		bundle      string
+		withRuntime bool
+		want        string
+	}{
+		// キャッシュの CLI は host.json を見て採用版に任せるが、clone には host.json を置かないので採用版を直接置く。
+		"locked bundle":   {bundle, true, "runtime"},
+		"missing runtime": {bundle, false, "cache"},
+		"invalid bundle":  {"../../etc", true, "cache"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			tree, rec := newTree(t, "")
+			work := t.TempDir()
+			writeStandards(t, filepath.Join(tree.WorkRoot, "n"), work, tc.bundle, tc.withRuntime)
+			if err := tree.copyStandardsRuntime(rec, work); err != nil {
+				t.Fatal(err)
+			}
+			data, err := os.ReadFile(filepath.Join(work, ".standards", "cache", "dev-standards"))
+			if err != nil || string(data) != tc.want {
+				t.Fatalf("copied=%q err=%v", data, err)
+			}
+		})
+	}
+}
