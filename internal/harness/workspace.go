@@ -13,6 +13,7 @@ import (
 	"regexp"
 	"strings"
 	"syscall"
+	"unicode/utf8"
 )
 
 var bundlePattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
@@ -395,8 +396,16 @@ func (t *GitTree) Revert(ctx context.Context, rec *Record) (string, string, erro
 }
 
 func tail(text string, limit int) string {
+	if limit <= 0 {
+		return ""
+	}
 	if len(text) <= limit {
 		return text
 	}
-	return text[len(text)-limit:]
+	start := len(text) - limit
+	// 切り出し位置が文字の途中なら、次の文字の先頭まで進める。
+	for start < len(text) && !utf8.RuneStart(text[start]) {
+		start++
+	}
+	return text[start:]
 }
